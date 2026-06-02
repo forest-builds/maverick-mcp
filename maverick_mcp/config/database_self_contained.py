@@ -38,7 +38,16 @@ class SelfContainedDatabaseConfig:
             pool_config: Database pool configuration. If None, will use settings-based config
         """
         self.database_url = database_url or self._get_database_url()
-        self.pool_config = pool_config or get_pool_config_from_settings()
+        # SQLite is a single-file database; the QueuePool capacity planning in
+        # DatabasePoolConfig (pool_size/max_overflow vs. server connection
+        # limits) is a Postgres concept and its validation rejects perfectly
+        # fine SQLite setups. Only build a pool config for server databases.
+        if pool_config is not None:
+            self.pool_config = pool_config
+        elif self.database_url.startswith("sqlite"):
+            self.pool_config = None
+        else:
+            self.pool_config = get_pool_config_from_settings()
         self.engine: Engine | None = None
         self.SessionLocal: sessionmaker | None = None
 
@@ -65,8 +74,12 @@ class SelfContainedDatabaseConfig:
         masked_url = self._mask_database_url(self.database_url)
         logger.info(f"Creating self-contained database engine: {masked_url}")
 
-        # Determine if we should use connection pooling
-        use_pooling = os.getenv("DB_USE_POOLING", "true").lower() == "true"
+        # Determine if we should use connection pooling. SQLite (pool_config is
+        # None) always uses NullPool regardless of the env flag.
+        use_pooling = (
+            self.pool_config is not None
+            and os.getenv("DB_USE_POOLING", "true").lower() == "true"
+        )
 
         if use_pooling:
             # Use QueuePool for production environments
@@ -155,6 +168,9 @@ class SelfContainedDatabaseConfig:
         if self.engine is None:
             self.create_engine()
 
+        # Auth models (mcp_users / mcp_api_keys / mcp_refresh_tokens) were
+        # removed for the personal, self-contained version, so they are no
+        # longer expected.
         expected_tables = {
             "mcp_stocks",
             "mcp_price_cache",
@@ -162,9 +178,6 @@ class SelfContainedDatabaseConfig:
             "mcp_maverick_bear_stocks",
             "mcp_supply_demand_breakouts",
             "mcp_technical_cache",
-            "mcp_users",  # From auth models
-            "mcp_api_keys",  # From auth models
-            "mcp_refresh_tokens",  # From auth models
         }
 
         try:

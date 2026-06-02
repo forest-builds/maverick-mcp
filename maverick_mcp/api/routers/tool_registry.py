@@ -1400,4 +1400,12 @@ def register_all_router_tools(mcp: FastMCP) -> None:
     except Exception as e:
         logger.error(f"Failed to register Schwab tools: {e}")
 
+    try:
+        from maverick_mcp.api.routers.vc_loop import register_vc_loop_tools
+
+        register_vc_loop_tools(mcp)
+        logger.info("VC loop tools registered successfully")
+    except Exception as e:
+        logger.error(f"Failed to register VC loop tools: {e}")
+
     logger.info("Tool registration process completed")

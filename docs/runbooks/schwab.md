@@ -79,15 +79,25 @@ portfolio_portfolio_correlation_analysis(portfolio_name="Schwab")
 
 ## MCP Tools
 
-The Schwab router registers these read-only tools:
+The Schwab router registers these read-only tools. Naming follows a side-split
+convention: `broker_*` tools talk to your external brokerage (Schwab is the
+concrete provider), while `maverick_*` tools act on Maverick's own data store.
 
-- `schwab_get_auth_url`
-- `schwab_exchange_code`
-- `schwab_auth_status`
-- `schwab_get_account_numbers`
-- `schwab_get_account_summary`
-- `schwab_get_positions`
-- `schwab_sync_portfolio`
+Brokerage link (OAuth):
+
+- `broker_link_start` — generate the OAuth login URL
+- `broker_link_finish` — exchange the callback code for local tokens
+- `broker_link_status` — safe link/token status
+
+Brokerage reads:
+
+- `broker_list_accounts` — linked accounts + connectivity smoke-test
+- `broker_positions` — live positions
+- `broker_account_summary` — account type, value, cash
+
+Maverick side:
+
+- `maverick_sync_portfolio` — import live positions into Maverick for analysis
 
 The tools intentionally avoid order placement, cancellation, replacement, and
 other trading actions. Any future trading support should be implemented as a

@@ -1,0 +1,55 @@
+"""SQLAlchemy models for the VC loop thesis ledger."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import JSON, DateTime, Float, Index, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from maverick_mcp.data.models import TimestampMixin
+from maverick_mcp.database.base import Base
+
+
+class ThesisLedger(Base, TimestampMixin):
+    """A single investment thesis proposed by the VC loop.
+
+    Each row captures the rationale, the normalized signal inputs that drove
+    it, a conviction score, and (later) the realized outcome used for the
+    learning loop.
+    """
+
+    __tablename__ = "vc_thesis_ledger"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    thesis_date: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+    # Human-readable rationale for the thesis.
+    thesis: Mapped[str] = mapped_column(Text, nullable=False)
+    # Raw normalized signal inputs that produced the thesis.
+    features: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Conviction on a 0-100 scale.
+    conviction: Mapped[float] = mapped_column(Float, nullable=False)
+    # Per-component contributions to the conviction score.
+    score_breakdown: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # "proposed" | "open" | "closed"
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="proposed"
+    )
+    # e.g. "BUY watch", "trim"
+    proposed_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Filled in a later phase once the outcome is known.
+    outcome: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Relative path to the Obsidian memo.
+    note_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index("idx_vc_thesis_ticker", "ticker"),
+        Index("idx_vc_thesis_status", "status"),
+    )

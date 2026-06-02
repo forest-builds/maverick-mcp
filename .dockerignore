@@ -20,10 +20,13 @@ build/
 .env
 .env.*
 !.env.example
+.local/
+secrets/
 
 # Git
 .git/
 .gitignore
+.gitnexus/
 
 # Docker
 Dockerfile
@@ -33,6 +36,7 @@ docker-compose.yml
 # IDE
 .vscode/
 .idea/
+.claude/settings.local.json
 *.swp
 *.swo
 *~
@@ -43,9 +47,17 @@ Thumbs.db
 
 # Project specific
 *.log
+logs/
 *.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
+/data/
+portfolio/
+vc/
+docs/personal/
 test_cache_debug.py
 test_market_calendar_caching.py
 
