@@ -13,7 +13,14 @@ from maverick_mcp.vc_loop.obsidian import (
 
 def test_ensure_vault_creates_folders(tmp_path):
     ensure_vault(tmp_path)
-    for folder in ("04-theses", "08-reviews", "Companies", "Pipeline"):
+    for folder in (
+        "04-theses",
+        "04-theses/generated",
+        "04-theses/promoted",
+        "08-reviews",
+        "Companies",
+        "Pipeline",
+    ):
         assert (tmp_path / folder).is_dir()
 
 
@@ -54,7 +61,7 @@ def test_write_thesis_note_has_links_and_table(tmp_path):
         sector="Technology",
         catalysts=catalysts,
     )
-    assert rel == "04-theses/MSFT-2026-06-01.md"
+    assert rel == "04-theses/generated/MSFT-2026-06-01.md"
     content = (tmp_path / rel).read_text()
 
     assert "type: thesis" in content
@@ -90,18 +97,25 @@ def test_write_pipeline_note_ranked_table(tmp_path):
     rel = write_pipeline_note(tmp_path, date="2026-06-01", ranked=ranked)
     assert rel == "Pipeline/2026-06-01.md"
     content = (tmp_path / rel).read_text()
+    current = (tmp_path / "Pipeline/Current.md").read_text()
 
     assert "| Rank | Ticker | Conviction | Action | Thesis |" in content
-    assert "| 1 | [[NVDA]] | 90.0 | BUY (high conviction) | [[NVDA-2026-06-01]] |" in content
+    assert (
+        "| 1 | [[NVDA]] | 90.0 | BUY (high conviction) | [[NVDA-2026-06-01]] |"
+        in content
+    )
     # Fallback thesis link for entry without thesis_path.
     assert "[[TSLA]]" in content
     assert "[[TSLA-2026-06-01]]" in content
+    assert "type: current-pipeline" in current
+    assert "Source: [[2026-06-01]]" in current
+    assert "[[NVDA-2026-06-01]]" in current
 
 
 def test_write_pipeline_base(tmp_path):
     rel = write_pipeline_base(tmp_path)
     assert rel == "VC Pipeline.base"
     content = (tmp_path / rel).read_text()
-    assert 'file.inFolder("04-theses")' in content
+    assert 'file.inFolder("04-theses/generated")' in content
     assert "conviction" in content
     assert "type: table" in content

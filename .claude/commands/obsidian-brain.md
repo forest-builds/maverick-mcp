@@ -34,12 +34,21 @@ vc/
   02-accounts/
   03-watchlists/
   04-theses/
+    generated/      automated daily candidates from vc_loop
+    promoted/       CIO-reviewed durable theses
   05-research/
   06-ic-memos/
   07-decisions/
   08-reviews/
   09-inbox/
+  Pipeline/
+    Current.md      stable pointer to latest ranked pipeline
 ```
+
+Generated theses are raw candidates, not decisions. Promote only reviewed ideas
+into `04-theses/promoted/`, record the decision state in
+`07-decisions/Decision Log.md`, and make stale generated notes visible during
+the weekly review instead of letting them silently accumulate.
 
 Do not store secrets, API keys, brokerage credentials, or account login
 artifacts in Obsidian or GBrain.

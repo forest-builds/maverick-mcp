@@ -9,10 +9,13 @@ writes *into* the existing structure (theses land where the Thesis Index
 Dataview query looks, reviews land beside the Weekly Review, etc.)::
 
     <vault>/
-        04-theses/<TICKER>-<YYYY-MM-DD>.md   thesis memos (one per run/ticker)
+        04-theses/generated/<TICKER>-<YYYY-MM-DD>.md
+                                                generated thesis memos
+        04-theses/promoted/                    human-reviewed thesis memos
         08-reviews/                          review notes (reserved)
         Companies/<TICKER>.md                graph-hub note per company
         Pipeline/<YYYY-MM-DD>.md             ranked daily pipeline
+        Pipeline/Current.md                  latest ranked pipeline pointer
         VC Pipeline.base                     Obsidian Bases table view
 
 Thesis notes use the shared `type: thesis` frontmatter (asset, account_fit,
@@ -32,11 +35,20 @@ from pathlib import Path
 # Folder names within the vault. Aligned with the numbered investment-brain
 # layout; companies/pipeline have no numbered equivalent so keep dedicated dirs.
 THESES_DIR = "04-theses"
+GENERATED_THESES_DIR = f"{THESES_DIR}/generated"
+PROMOTED_THESES_DIR = f"{THESES_DIR}/promoted"
 REVIEWS_DIR = "08-reviews"
 COMPANIES_DIR = "Companies"
 PIPELINE_DIR = "Pipeline"
 
-_FOLDERS = (THESES_DIR, REVIEWS_DIR, COMPANIES_DIR, PIPELINE_DIR)
+_FOLDERS = (
+    THESES_DIR,
+    GENERATED_THESES_DIR,
+    PROMOTED_THESES_DIR,
+    REVIEWS_DIR,
+    COMPANIES_DIR,
+    PIPELINE_DIR,
+)
 
 
 def _vault(vault_path: str | Path) -> Path:
@@ -81,8 +93,10 @@ def write_company_note(
 
     lines = [
         "---",
+        f"title: {_yaml_scalar(ticker)}",
         f"ticker: {_yaml_scalar(ticker)}",
         "type: company",
+        f"created: {_yaml_scalar(_date_cls.today().isoformat())}",
     ]
     if sector:
         lines.append(f"sector: {_yaml_scalar(sector)}")
@@ -172,20 +186,21 @@ def write_thesis_note(
     catalysts: list | None = None,
     account_fit: str | None = None,
 ) -> str:
-    """Write ``04-theses/<TICKER>-<YYYY-MM-DD>.md`` and return its relative path.
+    """Write a generated thesis note and return its relative path.
 
     Emits the shared ``type: thesis`` frontmatter (so the Thesis Index Dataview
     picks it up) and the required review sections.
     """
     ensure_vault(vault_path)
     ticker = str(ticker).upper()
-    rel = f"{THESES_DIR}/{ticker}-{date}.md"
+    rel = f"{GENERATED_THESES_DIR}/{ticker}-{date}.md"
     path = _vault(vault_path) / rel
 
     confidence = round(conviction / 100.0, 3)
 
     lines = [
         "---",
+        f"title: {_yaml_scalar(f'{ticker} thesis - {date}')}",
         "type: thesis",
         f"asset: {_yaml_scalar(ticker)}",
         f"ticker: {_yaml_scalar(ticker)}",
@@ -216,9 +231,7 @@ def write_thesis_note(
 
     lines.append("## Why Now")
     lines.append("")
-    lines.append(
-        f"Surfaced by the screen with conviction {conviction} → **{action}**."
-    )
+    lines.append(f"Surfaced by the screen with conviction {conviction} → **{action}**.")
     lines.append("")
 
     if catalysts:
@@ -266,6 +279,54 @@ def write_thesis_note(
     return rel
 
 
+def _pipeline_table_lines(date: str, ranked: list[dict]) -> list[str]:
+    lines = [
+        "| Rank | Ticker | Conviction | Action | Thesis |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for i, entry in enumerate(ranked, start=1):
+        ticker = str(entry.get("ticker", "")).upper()
+        conviction = entry.get("conviction", "")
+        action = entry.get("action", "")
+        thesis_path = entry.get("thesis_path")
+        if thesis_path:
+            note_name = Path(str(thesis_path)).stem
+            thesis_link = f"[[{note_name}]]"
+        else:
+            thesis_link = f"[[{ticker}-{date}]]"
+        lines.append(
+            f"| {i} | [[{ticker}]] | {conviction} | {action} | {thesis_link} |"
+        )
+    return lines
+
+
+def _write_current_pipeline_note(
+    vault_path: str | Path, *, date: str, ranked: list[dict]
+) -> str:
+    rel = f"{PIPELINE_DIR}/Current.md"
+    path = _vault(vault_path) / rel
+
+    lines = [
+        "---",
+        f"title: {_yaml_scalar('Current VC pipeline')}",
+        f"date: {_yaml_scalar(date)}",
+        f"created: {_yaml_scalar(date)}",
+        "type: current-pipeline",
+        f"source_note: {_yaml_scalar(f'{PIPELINE_DIR}/{date}.md')}",
+        "---",
+        "",
+        "# Current VC pipeline",
+        "",
+        f"Source: [[{date}]]",
+        "",
+    ]
+    lines.extend(_pipeline_table_lines(date, ranked))
+    lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return rel
+
+
 def write_pipeline_note(
     vault_path: str | Path, *, date: str, ranked: list[dict]
 ) -> str:
@@ -283,32 +344,20 @@ def write_pipeline_note(
 
     lines = [
         "---",
+        f"title: {_yaml_scalar(f'VC pipeline - {date}')}",
         f"date: {_yaml_scalar(date)}",
+        f"created: {_yaml_scalar(date)}",
         "type: pipeline",
         "---",
         "",
         f"# VC pipeline — {date}",
         "",
-        "| Rank | Ticker | Conviction | Action | Thesis |",
-        "| --- | --- | --- | --- | --- |",
     ]
-    for i, entry in enumerate(ranked, start=1):
-        ticker = str(entry.get("ticker", "")).upper()
-        conviction = entry.get("conviction", "")
-        action = entry.get("action", "")
-        thesis_path = entry.get("thesis_path")
-        if thesis_path:
-            # Wikilink to the thesis note (strip folder + .md for display).
-            note_name = Path(str(thesis_path)).stem
-            thesis_link = f"[[{note_name}]]"
-        else:
-            thesis_link = f"[[{ticker}-{date}]]"
-        lines.append(
-            f"| {i} | [[{ticker}]] | {conviction} | {action} | {thesis_link} |"
-        )
+    lines.extend(_pipeline_table_lines(date, ranked))
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
+    _write_current_pipeline_note(vault_path, date=date, ranked=ranked)
     return rel
 
 
@@ -326,7 +375,7 @@ def write_pipeline_base(vault_path: str | Path) -> str:
     content = (
         "filters:\n"
         "  and:\n"
-        f'    - file.inFolder("{THESES_DIR}")\n'
+        f'    - file.inFolder("{GENERATED_THESES_DIR}")\n'
         '    - type == "thesis"\n'
         "properties:\n"
         "  conviction:\n"
