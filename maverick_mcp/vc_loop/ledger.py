@@ -1,7 +1,6 @@
 """Thesis ledger service for the VC loop.
 
-Read/write access to the ``vc_thesis_ledger`` table plus a stub stats method
-for the learning loop. Full outcome-based scoring math lands in Phase 2.
+Read/write access to the ``vc_thesis_ledger`` table plus learning-loop stats.
 """
 
 from __future__ import annotations
@@ -175,15 +174,12 @@ class ThesisService:
     def thesis_stats(self) -> dict[str, Any]:
         """Aggregate stats over the ledger.
 
-        Computes what is possible without realized outcomes: total count,
-        a per-status breakdown, and average conviction. Outcome-based metrics
-        (``hit_rate``, ``brier_score``) land in Phase 2 once outcomes are
-        recorded, so they are returned as ``None`` here.
-
         Returns:
             A dict with keys ``total``, ``by_status``, ``avg_conviction``,
-            ``hit_rate`` (None), and ``brier_score`` (None).
+            ``hit_rate``, and ``brier_score``.
         """
+        from maverick_mcp.vc_loop.calibration import brier_score
+
         rows = self._db.query(ThesisLedger).all()
         total = len(rows)
 
@@ -195,11 +191,25 @@ class ThesisService:
             sum(row.conviction for row in rows) / total if total else None
         )
 
+        closed = [
+            row
+            for row in rows
+            if row.status == "closed"
+            and isinstance(row.outcome, dict)
+            and "win" in row.outcome
+        ]
+        hit_rate = (
+            sum(1 for row in closed if row.outcome and row.outcome.get("win"))
+            / len(closed)
+            if closed
+            else None
+        )
+
         return {
             "total": total,
             "by_status": by_status,
             "avg_conviction": avg_conviction,
-            # Phase 2: outcome-based scoring once `outcome` is populated.
-            "hit_rate": None,
-            "brier_score": None,
+            "closed_count": len(closed),
+            "hit_rate": hit_rate,
+            "brier_score": brier_score(rows),
         }

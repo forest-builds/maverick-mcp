@@ -133,12 +133,14 @@ def test_thesis_stats_keys_and_counts(service):
         "total",
         "by_status",
         "avg_conviction",
+        "closed_count",
         "hit_rate",
         "brier_score",
     }
     assert stats["total"] == 2
     assert stats["by_status"] == {"open": 1, "proposed": 1}
     assert stats["avg_conviction"] == pytest.approx(70.0)
+    assert stats["closed_count"] == 0
     assert stats["hit_rate"] is None
     assert stats["brier_score"] is None
 
