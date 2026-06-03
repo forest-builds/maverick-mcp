@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from pathlib import Path
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -63,11 +64,20 @@ def get_primary_key_type():
 if os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true":
     DATABASE_URL = "sqlite:///:memory:"
 else:
+    _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
     DATABASE_URL = (
         os.getenv("DATABASE_URL")
         or os.getenv("POSTGRES_URL")
-        or "sqlite:///maverick_mcp.db"  # Default to SQLite
+        or f"sqlite:///{_PROJECT_ROOT / 'maverick_mcp.db'}"
     )
+    # Resolve relative SQLite paths against the project root so the DB opens
+    # regardless of the launch CWD (e.g. Claude Desktop launches with CWD=/).
+    if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith(
+        "sqlite:////"
+    ):
+        _rel = DATABASE_URL[len("sqlite:///") :]
+        if _rel and _rel != ":memory:":
+            DATABASE_URL = f"sqlite:///{(_PROJECT_ROOT / _rel).resolve()}"
 
 # Database configuration from settings
 DB_POOL_SIZE = settings.db.pool_size

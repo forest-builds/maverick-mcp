@@ -800,21 +800,34 @@ def get_performance_logger(component: str) -> PerformanceMetricsLogger:
     return get_logger_manager().get_performance_logger(component)
 
 
+_UNSET = object()
+
+
 def setup_backtesting_logging(
-    log_level: str = "INFO", enable_debug: bool = False, log_file: str | None = None
+    log_level: str = "INFO", enable_debug: bool = False, log_file: Any = _UNSET
 ):
-    """Setup logging specifically configured for backtesting operations."""
+    """Setup logging specifically configured for backtesting operations.
+
+    Pass ``log_file=None`` explicitly to disable file logging (e.g. stdio MCP
+    mode, where the launch CWD may be read-only). When omitted, defaults to an
+    absolute path under the project root so it works regardless of CWD.
+    """
 
     # Set debug environment if requested
     if enable_debug:
         os.environ["MAVERICK_DEBUG"] = "true"
+
+    if log_file is _UNSET:
+        log_file = str(
+            Path(__file__).resolve().parent.parent.parent / "logs" / "backtesting.log"
+        )
 
     # Setup structured logging
     manager = get_logger_manager()
     manager.setup_structured_logging(
         log_level=log_level,
         log_format="json",
-        log_file=log_file or "logs/backtesting.log",
+        log_file=log_file,
         enable_async=True,
         enable_rotation=True,
         console_output="stderr",  # Use stderr for MCP compatibility

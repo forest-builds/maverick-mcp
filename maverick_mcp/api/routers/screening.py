@@ -16,22 +16,17 @@ logger = logging.getLogger(__name__)
 screening_router: FastMCP = FastMCP("Stock_Screening")
 
 
-def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
+def get_maverick_stocks(limit: int = 20, min_adr_pct: float = 3.5) -> dict[str, Any]:
     """
     Get top Maverick stocks from the screening results.
 
-    DISCLAIMER: Stock screening results are for educational and research purposes only.
-    This is not investment advice. Past performance does not guarantee future results.
-    Always conduct thorough research and consult financial professionals before investing.
-
-    The Maverick screening strategy identifies stocks with:
-    - High momentum strength
-    - Technical patterns (Cup & Handle, consolidation, etc.)
-    - Momentum characteristics
-    - Strong combined scores
+    Filters to growth/thematic names by minimum ADR (average daily range).
+    Default min_adr_pct=3.5 excludes low-volatility large caps (AAPL, GOOGL,
+    AMZN) while keeping high-growth names (NVDA, PLTR, space/quantum/drone plays).
 
     Args:
         limit: Maximum number of stocks to return (default: 20)
+        min_adr_pct: Minimum average daily range % to qualify (default: 3.5)
 
     Returns:
         Dictionary containing Maverick stock screening results
@@ -39,15 +34,29 @@ def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
     try:
         from maverick_mcp.data.models import MaverickStocks, SessionLocal
 
+        # Sectors that are not growth/VC-oriented
+        _EXCLUDE_SECTORS = {
+            "Financials", "Consumer Staples", "Utilities",
+            "Real Estate", "Consumer Discretionary",
+        }
+
         with SessionLocal() as session:
-            stocks = MaverickStocks.get_top_stocks(session, limit=limit)
+            # Fetch a larger set then filter by ADR and sector
+            candidates = MaverickStocks.get_top_stocks(session, limit=200)
+            stocks = [
+                s for s in candidates
+                if (s.adr_pct is not None and float(s.adr_pct) >= min_adr_pct)
+                and (s.stock is None or s.stock.sector is None
+                     or s.stock.sector not in _EXCLUDE_SECTORS)
+            ][:limit]
 
             return {
                 "status": "success",
                 "count": len(stocks),
                 "stocks": [stock.to_dict() for stock in stocks],
                 "screening_type": "maverick_bullish",
-                "description": "High momentum stocks with bullish technical setups",
+                "min_adr_pct": min_adr_pct,
+                "description": f"High-momentum growth stocks (ADR ≥ {min_adr_pct}%)",
             }
     except Exception as e:
         logger.error(f"Error fetching Maverick stocks: {str(e)}")

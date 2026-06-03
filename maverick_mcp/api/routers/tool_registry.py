@@ -383,24 +383,15 @@ def register_screening_tools(mcp: FastMCP) -> None:
 
 
 def register_portfolio_tools(mcp: FastMCP) -> None:
-    """Register portfolio tools directly on main server"""
+    """Register portfolio analysis tools directly on main server"""
     from maverick_mcp.api.routers.portfolio import (
-        add_portfolio_position,
-        clear_my_portfolio,
         compare_tickers,
         get_my_portfolio,
         portfolio_correlation_analysis,
-        remove_portfolio_position,
         risk_adjusted_analysis,
     )
 
-    # Portfolio management tools
-    mcp.tool(name="portfolio_add_position")(add_portfolio_position)
     mcp.tool(name="portfolio_get_my_portfolio")(get_my_portfolio)
-    mcp.tool(name="portfolio_remove_position")(remove_portfolio_position)
-    mcp.tool(name="portfolio_clear_portfolio")(clear_my_portfolio)
-
-    # Portfolio analysis tools
     mcp.tool(name="portfolio_risk_adjusted_analysis")(risk_adjusted_analysis)
     mcp.tool(name="portfolio_compare_tickers")(compare_tickers)
     mcp.tool(name="portfolio_portfolio_correlation_analysis")(
@@ -428,7 +419,6 @@ def register_data_tools(mcp: FastMCP) -> None:
     mcp.tool(name="data_fetch_stock_data")(fetch_stock_data)
     mcp.tool(name="data_fetch_stock_data_batch")(fetch_stock_data_batch)
     mcp.tool(name="data_get_stock_info")(get_stock_info)
-    mcp.tool(name="data_get_adanos_market_sentiment")(get_adanos_market_sentiment)
 
     # Use enhanced news sentiment that doesn't rely on EXTERNAL_DATA_API_KEY
     @mcp.tool(name="data_get_news_sentiment")
@@ -464,8 +454,6 @@ def register_data_tools(mcp: FastMCP) -> None:
             }
 
     mcp.tool(name="data_get_cached_price_data")(get_cached_price_data)
-    mcp.tool(name="data_get_chart_links")(get_chart_links)
-    mcp.tool(name="data_clear_cache")(clear_cache)
 
 
 def register_performance_tools(mcp: FastMCP) -> None:
@@ -566,64 +554,6 @@ def register_agent_tools(mcp: FastMCP) -> None:
                         query_text=query[:500] if query else None,
                         query_classification="market_screening",
                         routing_decision=["market_agent"],
-                        duration_ms=duration_ms,
-                        status="error",
-                        error_category=error_cat.value,
-                        response_summary=str(e)[:500],
-                    )
-                except Exception:
-                    pass
-                if error_cat == ErrorCategory.TRANSIENT:
-                    return {"error": f"Temporary error, please retry: {e}"}
-                raise
-
-        @mcp.tool(name="agents_get_agent_streaming_analysis")
-        async def _agents_get_agent_streaming_analysis(
-            query: str,
-            persona: str = "moderate",
-            stream_mode: str = "updates",
-            session_id: str | None = None,
-        ) -> dict:
-            """Get streaming analysis from an AI agent for real-time updates."""
-            if not _rate_limiter.check_rate_limit(ToolCategory.AGENT):
-                return {
-                    "error": "Rate limit exceeded for agent tools. Please try again shortly."
-                }
-            config = TOOL_CATEGORY_CONFIGS[ToolCategory.AGENT]
-            start_time = time.time()
-            request_id = str(uuid.uuid4())[:8]
-            try:
-                async with asyncio.timeout(config.timeout_seconds):
-                    result = await get_agent_streaming_analysis(
-                        query=query,
-                        persona=persona,
-                        stream_mode=stream_mode,
-                        session_id=session_id,
-                    )
-                duration_ms = int((time.time() - start_time) * 1000)
-                try:
-                    _decision_logger.log_decision(
-                        session_id=session_id or "mcp",
-                        request_id=request_id,
-                        query_text=query[:500] if query else None,
-                        query_classification="streaming_analysis",
-                        routing_decision=["streaming_agent"],
-                        duration_ms=duration_ms,
-                        status="success",
-                    )
-                except Exception:
-                    pass
-                return result
-            except Exception as e:
-                duration_ms = int((time.time() - start_time) * 1000)
-                error_cat = classify_error(e)
-                try:
-                    _decision_logger.log_decision(
-                        session_id=session_id or "mcp",
-                        request_id=request_id,
-                        query_text=query[:500] if query else None,
-                        query_classification="streaming_analysis",
-                        routing_decision=["streaming_agent"],
                         duration_ms=duration_ms,
                         status="error",
                         error_category=error_cat.value,
@@ -800,64 +730,6 @@ def register_agent_tools(mcp: FastMCP) -> None:
                         query_text=research_topic[:500] if research_topic else None,
                         query_classification="deep_research",
                         routing_decision=["deep_research_agent"],
-                        duration_ms=duration_ms,
-                        status="error",
-                        error_category=error_cat.value,
-                        response_summary=str(e)[:500],
-                    )
-                except Exception:
-                    pass
-                if error_cat == ErrorCategory.TRANSIENT:
-                    return {"error": f"Temporary error, please retry: {e}"}
-                raise
-
-        @mcp.tool(name="agents_compare_multi_agent_analysis")
-        async def _agents_compare_multi_agent_analysis(
-            query: str,
-            agent_types: list[str] | None = None,
-            persona: str = "moderate",
-            session_id: str | None = None,
-        ) -> dict:
-            """Compare analysis results from multiple agent types side by side."""
-            if not _rate_limiter.check_rate_limit(ToolCategory.AGENT):
-                return {
-                    "error": "Rate limit exceeded for agent tools. Please try again shortly."
-                }
-            config = TOOL_CATEGORY_CONFIGS[ToolCategory.AGENT]
-            start_time = time.time()
-            request_id = str(uuid.uuid4())[:8]
-            try:
-                async with asyncio.timeout(config.timeout_seconds):
-                    result = await compare_multi_agent_analysis(
-                        query=query,
-                        agent_types=agent_types,
-                        persona=persona,
-                        session_id=session_id,
-                    )
-                duration_ms = int((time.time() - start_time) * 1000)
-                try:
-                    _decision_logger.log_decision(
-                        session_id=session_id or "mcp",
-                        request_id=request_id,
-                        query_text=query[:500] if query else None,
-                        query_classification="multi_agent_comparison",
-                        routing_decision=agent_types or ["market", "technical"],
-                        duration_ms=duration_ms,
-                        status="success",
-                    )
-                except Exception:
-                    pass
-                return result
-            except Exception as e:
-                duration_ms = int((time.time() - start_time) * 1000)
-                error_cat = classify_error(e)
-                try:
-                    _decision_logger.log_decision(
-                        session_id=session_id or "mcp",
-                        request_id=request_id,
-                        query_text=query[:500] if query else None,
-                        query_classification="multi_agent_comparison",
-                        routing_decision=agent_types or ["market", "technical"],
                         duration_ms=duration_ms,
                         status="error",
                         error_category=error_cat.value,
@@ -1300,12 +1172,6 @@ def register_all_router_tools(mcp: FastMCP) -> None:
         logger.error(f"Failed to register data tools: {e}")
 
     try:
-        register_performance_tools(mcp)
-        logger.info("Performance tools registered successfully")
-    except Exception as e:
-        logger.error(f"Failed to register performance tools: {e}")
-
-    try:
         register_agent_tools(mcp)
         logger.info("Agent tools registered successfully")
     except Exception as e:
@@ -1330,23 +1196,11 @@ def register_all_router_tools(mcp: FastMCP) -> None:
     except Exception as e:
         logger.error(f"Failed to register health monitoring tools: {e}")
 
-    # Register backtesting tools
-    register_backtesting_tools(mcp)
-
-    # Register MCP prompts and resources for introspection
-    register_mcp_prompts_and_resources(mcp)
-
     try:
         register_decision_log_tools(mcp)
         logger.info("Decision log tools registered successfully")
     except Exception as e:
         logger.error(f"Failed to register decision log tools: {e}")
-
-    try:
-        register_tool_registry_status(mcp)
-        logger.info("Tool registry status tool registered successfully")
-    except Exception as e:
-        logger.error(f"Failed to register tool registry status: {e}")
 
     try:
         from maverick_mcp.api.routers.signals import register_signal_tools
@@ -1407,5 +1261,13 @@ def register_all_router_tools(mcp: FastMCP) -> None:
         logger.info("VC loop tools registered successfully")
     except Exception as e:
         logger.error(f"Failed to register VC loop tools: {e}")
+
+    try:
+        from maverick_mcp.api.routers.investment_ops import register_investment_ops_tools
+
+        register_investment_ops_tools(mcp)
+        logger.info("Investment ops tools registered successfully")
+    except Exception as e:
+        logger.error(f"Failed to register investment ops tools: {e}")
 
     logger.info("Tool registration process completed")
