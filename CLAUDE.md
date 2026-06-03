@@ -47,7 +47,12 @@ make test
 make lint
 make typecheck
 make docs-check
+npx gitnexus analyze   # reindex after any significant code change
 ```
+
+Run `npx gitnexus analyze` after adding files, modifying routers/services, or
+merging branches. The PostToolUse hook detects staleness after `git commit` but
+does not reindex automatically — do it explicitly to keep the graph current.
 
 ## Important Constraints
 
@@ -65,7 +70,7 @@ make docs-check
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **maverick-mcp** (20737 symbols, 37324 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **maverick-mcp** (20824 symbols, 37437 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
