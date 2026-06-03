@@ -79,3 +79,35 @@ def register_vc_loop_tools(mcp: FastMCP) -> None:
         except Exception as e:
             logger.error("vc_loop_pipeline error: %s", e)
             return {"status": "error", "error": str(e)}
+
+    @mcp.tool(
+        name="vc_loop_review",
+        description=(
+            "Review due VC-loop theses by comparing later prices to thesis-date "
+            "prices, close outcomes in the ledger, and return calibration, Brier "
+            "score, edge attribution, and learned scorer weights. Research only."
+        ),
+    )
+    def vc_loop_review(
+        days_after: int = 30,
+        limit: int = 100,
+        min_return_pct: float = 0.0,
+        thesis_ids: list[int] | None = None,
+        update_weights: bool = True,
+    ) -> dict[str, Any]:
+        try:
+            from maverick_mcp.data.models import SessionLocal
+            from maverick_mcp.vc_loop.calibration import review_theses
+
+            with SessionLocal() as session:
+                return review_theses(
+                    session,
+                    days_after=days_after,
+                    limit=limit,
+                    min_return_pct=min_return_pct,
+                    thesis_ids=thesis_ids,
+                    update_weights=update_weights,
+                )
+        except Exception as e:
+            logger.error("vc_loop_review error: %s", e)
+            return {"status": "error", "error": str(e)}
