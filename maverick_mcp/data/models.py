@@ -566,10 +566,13 @@ class MaverickStocks(Base, TimestampMixin):
     def get_top_stocks(
         cls, session: Session, limit: int = 20
     ) -> Sequence[MaverickStocks]:
-        """Get top maverick stocks by combined score."""
+        """Get top maverick stocks by combined score from the latest screen date."""
+        from sqlalchemy import func
+        latest = session.query(func.max(cls.date_analyzed)).scalar()
         return (
             session.query(cls)
             .join(Stock)
+            .filter(cls.date_analyzed == latest)
             .order_by(cls.combined_score.desc())
             .limit(limit)
             .all()
@@ -688,9 +691,16 @@ class MaverickBearStocks(Base, TimestampMixin):
     def get_top_stocks(
         cls, session: Session, limit: int = 20
     ) -> Sequence[MaverickBearStocks]:
-        """Get top maverick bear stocks by score."""
+        """Get top maverick bear stocks by score from the latest screen date."""
+        from sqlalchemy import func
+        latest = session.query(func.max(cls.date_analyzed)).scalar()
         return (
-            session.query(cls).join(Stock).order_by(cls.score.desc()).limit(limit).all()
+            session.query(cls)
+            .join(Stock)
+            .filter(cls.date_analyzed == latest)
+            .order_by(cls.score.desc())
+            .limit(limit)
+            .all()
         )
 
     @classmethod
@@ -814,10 +824,13 @@ class SupplyDemandBreakoutStocks(Base, TimestampMixin):
     def get_top_stocks(
         cls, session: Session, limit: int = 20
     ) -> Sequence[SupplyDemandBreakoutStocks]:
-        """Get top supply/demand breakout stocks by momentum score."""  # formerly relative strength rating
+        """Get top supply/demand breakout stocks by momentum score from the latest screen date."""  # formerly relative strength rating
+        from sqlalchemy import func
+        latest = session.query(func.max(cls.date_analyzed)).scalar()
         return (
             session.query(cls)
             .join(Stock)
+            .filter(cls.date_analyzed == latest)
             .order_by(cls.momentum_score.desc())  # formerly rs_rating
             .limit(limit)
             .all()

@@ -500,6 +500,33 @@ if hasattr(mcp, "fastapi_app") and mcp.fastapi_app:
 
             maverick_scheduler.start()
             logger.info("Service layer scheduler started on server loop")
+
+            # Daily Schwab token keep-alive: one lightweight API call rolls the
+            # 7-day refresh token window forward so re-auth is never needed.
+            def _schwab_keepalive() -> None:
+                try:
+                    from dotenv import load_dotenv
+
+                    load_dotenv()
+                    from maverick_mcp.providers.schwab import (
+                        SchwabAuthConfig,
+                        SchwabClient,
+                        SchwabTokenStore,
+                    )
+
+                    config = SchwabAuthConfig.from_env()
+                    store = SchwabTokenStore(config.token_file)
+                    if store.status().get("has_refresh_token"):
+                        client = SchwabClient(config, store)
+                        client.account_numbers()
+                        logger.info("Schwab token keep-alive: refresh token rolled")
+                except Exception as exc:
+                    logger.warning("Schwab token keep-alive failed: %s", exc)
+
+            maverick_scheduler.add_cron_job(
+                "schwab_token_keepalive", _schwab_keepalive, hour=2, minute=0
+            )
+            logger.info("Schwab daily token keep-alive scheduled at 02:00")
         except Exception as e:
             logger.error(f"Failed to start service layer scheduler: {e}")
 
