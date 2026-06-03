@@ -87,6 +87,15 @@ excludes `integration`, `slow`, and `external` tests.
 - Use the docs catalog checker when moving, deleting, or adding Markdown/text
   files.
 
+## Deployment Constraint
+
+**This server is local-only.** The only valid deployment target is the user's
+own machine via `make dev-stdio` (Claude Desktop) or `make dev` (local HTTP on
+port 8003). Do not introduce hosted deployment, remote servers, Docker-to-cloud
+targets, auth layers, billing, multi-tenant scope, or any configuration that
+implies running this as a public or shared service — unless the user explicitly
+starts a new plan for that.
+
 ## Safety And Configuration
 
 - Do not commit `.env`, API keys, database dumps, cache artifacts, or generated

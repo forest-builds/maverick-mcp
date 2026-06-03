@@ -53,6 +53,10 @@ make docs-check
 
 - This is a personal-use educational financial analysis server, not financial
   advice.
+- **Local deployment only.** The only valid targets are `make dev-stdio`
+  (Claude Desktop STDIO) and `make dev` (local HTTP on port 8003). Never
+  introduce hosted/remote/cloud deployment, auth, billing, or multi-tenant
+  scope without an explicit new plan.
 - Do not reintroduce auth, billing, or hosted SaaS scope without an explicit
   plan.
 - Keep documentation changes cataloged in `docs/CATALOG.md`.
