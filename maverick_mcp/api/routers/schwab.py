@@ -55,13 +55,14 @@ def register_schwab_tools(mcp: FastMCP) -> None:
     """Register Schwab tools on the given FastMCP instance."""
 
     @mcp.tool(
-        name="schwab_get_auth_url",
+        name="broker_link_start",
         description=(
-            "Generate the Schwab OAuth login URL. Open it in a browser, approve "
-            "account access, then pass the returned callback URL to schwab_exchange_code."
+            "Start linking your brokerage (Schwab): generate the OAuth login URL. "
+            "Open it in a browser, approve account access, then pass the returned "
+            "callback URL to broker_link_finish."
         ),
     )
-    def schwab_get_auth_url() -> dict[str, Any]:
+    def broker_link_start() -> dict[str, Any]:
         try:
             config, store = _load_schwab()
             return {
@@ -71,17 +72,18 @@ def register_schwab_tools(mcp: FastMCP) -> None:
                 "token_file": str(store.token_file),
             }
         except Exception as e:
-            logger.error("schwab_get_auth_url error: %s", e)
+            logger.error("broker_link_start error: %s", e)
             return {"status": "error", "error": str(e)}
 
     @mcp.tool(
-        name="schwab_exchange_code",
+        name="broker_link_finish",
         description=(
-            "Exchange a Schwab authorization code or full callback URL for local "
-            "tokens. Stores tokens in SCHWAB_TOKEN_FILE."
+            "Finish linking your brokerage (Schwab): exchange an authorization code "
+            "or full callback URL for local tokens. Stores tokens in "
+            "SCHWAB_TOKEN_FILE."
         ),
     )
-    def schwab_exchange_code(code_or_callback_url: str) -> dict[str, Any]:
+    def broker_link_finish(code_or_callback_url: str) -> dict[str, Any]:
         try:
             from maverick_mcp.providers.schwab.auth import exchange_authorization_code
 
@@ -91,29 +93,30 @@ def register_schwab_tools(mcp: FastMCP) -> None:
             store.write(token)
             return {"status": "ok", "auth": store.status()}
         except Exception as e:
-            logger.error("schwab_exchange_code error: %s", e)
+            logger.error("broker_link_finish error: %s", e)
             return {"status": "error", "error": str(e)}
 
     @mcp.tool(
-        name="schwab_auth_status",
-        description="Return safe local Schwab OAuth token status without secrets.",
+        name="broker_link_status",
+        description="Return safe brokerage link/token status without secrets (Schwab).",
     )
-    def schwab_auth_status() -> dict[str, Any]:
+    def broker_link_status() -> dict[str, Any]:
         try:
             _, store = _load_schwab()
             return {"status": "ok", "auth": store.status()}
         except Exception as e:
-            logger.error("schwab_auth_status error: %s", e)
+            logger.error("broker_link_status error: %s", e)
             return {"status": "error", "error": str(e)}
 
     @mcp.tool(
-        name="schwab_get_account_numbers",
+        name="broker_list_accounts",
         description=(
-            "Smoke-test Schwab connectivity by fetching account labels and hash "
-            "values. Full account numbers are not returned."
+            "List linked brokerage accounts (Schwab) by label and hash value; "
+            "doubles as a connectivity smoke-test. Full account numbers are not "
+            "returned."
         ),
     )
-    def schwab_get_account_numbers() -> dict[str, Any]:
+    def broker_list_accounts() -> dict[str, Any]:
         try:
             from maverick_mcp.providers.schwab import SchwabClient
 
@@ -125,17 +128,17 @@ def register_schwab_tools(mcp: FastMCP) -> None:
                 "accounts": _safe_account_numbers(account_numbers),
             }
         except Exception as e:
-            logger.error("schwab_get_account_numbers error: %s", e)
+            logger.error("broker_list_accounts error: %s", e)
             return {"status": "error", "error": str(e)}
 
     @mcp.tool(
-        name="schwab_get_positions",
+        name="broker_positions",
         description=(
-            "Fetch live Schwab positions and return normalized ticker, shares, "
+            "Fetch live brokerage positions (Schwab): normalized ticker, shares, "
             "average price, market value, and asset type."
         ),
     )
-    def schwab_get_positions() -> dict[str, Any]:
+    def broker_positions() -> dict[str, Any]:
         try:
             from maverick_mcp.providers.schwab import SchwabClient
             from maverick_mcp.providers.schwab.sync import fetch_schwab_positions
@@ -162,17 +165,17 @@ def register_schwab_tools(mcp: FastMCP) -> None:
                 "as_of": datetime.now(UTC).isoformat(),
             }
         except Exception as e:
-            logger.error("schwab_get_positions error: %s", e)
+            logger.error("broker_positions error: %s", e)
             return {"status": "error", "error": str(e)}
 
     @mcp.tool(
-        name="schwab_get_account_summary",
+        name="broker_account_summary",
         description=(
-            "Fetch a scrubbed Schwab account summary with account type, position "
-            "count, liquidation value, and available cash when Schwab provides it."
+            "Fetch a scrubbed brokerage account summary (Schwab): account type, "
+            "position count, liquidation value, and available cash when provided."
         ),
     )
-    def schwab_get_account_summary() -> dict[str, Any]:
+    def broker_account_summary() -> dict[str, Any]:
         try:
             from maverick_mcp.providers.schwab import SchwabClient
             from maverick_mcp.providers.schwab.sync import summarize_accounts
@@ -204,17 +207,18 @@ def register_schwab_tools(mcp: FastMCP) -> None:
                 "as_of": datetime.now(UTC).isoformat(),
             }
         except Exception as e:
-            logger.error("schwab_get_account_summary error: %s", e)
+            logger.error("broker_account_summary error: %s", e)
             return {"status": "error", "error": str(e)}
 
     @mcp.tool(
-        name="schwab_sync_portfolio",
+        name="maverick_sync_portfolio",
         description=(
-            "Snapshot live Schwab positions into Maverick's local portfolio "
-            "storage. Existing positions in the selected portfolio are replaced."
+            "Import live brokerage positions (Schwab) into Maverick's local "
+            "portfolio storage so they can be analyzed. Existing positions in the "
+            "selected portfolio are replaced."
         ),
     )
-    def schwab_sync_portfolio(
+    def maverick_sync_portfolio(
         portfolio_name: str = "Schwab",
         user_id: str = "default",
     ) -> dict[str, Any]:
@@ -230,5 +234,5 @@ def register_schwab_tools(mcp: FastMCP) -> None:
                 user_id=user_id,
             )
         except Exception as e:
-            logger.error("schwab_sync_portfolio error: %s", e)
+            logger.error("maverick_sync_portfolio error: %s", e)
             return {"status": "error", "error": str(e)}

@@ -966,6 +966,24 @@ class MemoryConfig(BaseModel):
     )
 
 
+class VCLoopConfig(BaseModel):
+    """VC loop configuration settings."""
+
+    vault_path: str = Field(
+        default_factory=lambda: os.getenv("MAVERICK_VC_VAULT_PATH")
+        or os.path.join(
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ),
+            "vc",
+        ),
+        description=(
+            "Path to the Obsidian vault where the VC loop writes theses, "
+            "company notes, and the ranked pipeline."
+        ),
+    )
+
+
 class Settings(BaseModel):
     """Main application settings."""
 
@@ -1034,6 +1052,9 @@ class Settings(BaseModel):
     )
     memory: MemoryConfig = Field(
         default_factory=MemoryConfig, description="Memory persistence settings"
+    )
+    vc_loop: VCLoopConfig = Field(
+        default_factory=VCLoopConfig, description="VC loop settings"
     )
 
 

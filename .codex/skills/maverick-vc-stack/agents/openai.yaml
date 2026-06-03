@@ -1,0 +1,8 @@
+interface:
+  display_name: "Maverick Investment Brain"
+  short_description: "Autonomous investing analyst team"
+  brand_color: "#2563EB"
+  default_prompt: "Use $maverick-vc-stack to coordinate an investment research mission with specialist desks, evidence cards, risk review, and a CIO-ready memo."
+
+policy:
+  allow_implicit_invocation: true

@@ -3,7 +3,6 @@
 import re
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import PromptTemplate
 
 from .templates import STRATEGY_TEMPLATES

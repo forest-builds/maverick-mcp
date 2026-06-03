@@ -17,10 +17,12 @@ from alembic import context
 # Add project root to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Import models
-from maverick_mcp.data.models import Base as DataBase
+# Import every model so target_metadata covers the full schema: core models
+# plus all component models (journal, watchlist, signals, risk, screening,
+# vc_loop). Importing all_models registers them on the shared Base.metadata.
+import maverick_mcp.database.all_models  # noqa: F401
+from maverick_mcp.database.base import Base as DataBase
 
-# Use data models metadata (auth removed for personal version)
 combined_metadata = DataBase.metadata
 
 # this is the Alembic Config object, which provides
@@ -32,10 +34,21 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Get database URL from environment or use default
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    os.getenv("POSTGRES_URL", "postgresql://localhost/local_production_snapshot"),
+# Load .env so the CLI resolves the same DATABASE_URL as the app (`uv run` does
+# not auto-load .env). Default to the app's SQLite database, matching
+# SelfContainedDatabaseConfig.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # pragma: no cover - dotenv optional
+    pass
+
+# Get database URL from environment or use the app default
+DATABASE_URL = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("MCP_DATABASE_URL")
+    or "sqlite:///maverick_mcp.db"
 )
 
 # Override sqlalchemy.url in alembic.ini
@@ -53,56 +66,14 @@ target_metadata = combined_metadata
 
 
 def include_object(object, name, type_, reflected, compare_to):
-    """
-    Include only MCP-prefixed tables and stock-related tables.
+    """Manage only the tables defined in our model metadata.
 
-    This ensures Alembic only manages tables that belong to Maverick-MCP,
-    not Django tables.
+    ``target_metadata`` now contains every Maverick-MCP model (core +
+    components), so Alembic should manage exactly those tables and ignore any
+    other tables that happen to exist in the database.
     """
     if type_ == "table":
-        # Include MCP tables and stock tables
-        return (
-            name.startswith("mcp_")
-            or name.startswith("stocks_")
-            or name
-            in ["maverick_stocks", "maverick_bear_stocks", "supply_demand_breakouts"]
-        )
-    elif type_ in [
-        "index",
-        "unique_constraint",
-        "foreign_key_constraint",
-        "check_constraint",
-    ]:
-        # Include indexes and constraints for our tables
-        if hasattr(object, "table") and object.table is not None:
-            table_name = object.table.name
-            return (
-                table_name.startswith("mcp_")
-                or table_name.startswith("stocks_")
-                or table_name
-                in [
-                    "maverick_stocks",
-                    "maverick_bear_stocks",
-                    "supply_demand_breakouts",
-                ]
-            )
-        # For reflected objects, check the table name in the name
-        return any(
-            name.startswith(prefix)
-            for prefix in [
-                "idx_mcp_",
-                "uq_mcp_",
-                "fk_mcp_",
-                "ck_mcp_",
-                "idx_stocks_",
-                "uq_stocks_",
-                "fk_stocks_",
-                "ck_stocks_",
-                "ck_pricecache_",
-                "ck_maverick_",
-                "ck_supply_demand_",
-            ]
-        )
+        return name in target_metadata.tables
     return True
 
 

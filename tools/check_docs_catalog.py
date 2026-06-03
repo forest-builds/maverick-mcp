@@ -81,6 +81,8 @@ def is_allowlisted(path: Path) -> bool:
     return (
         path_str in ROOT_DOCS
         or path_str in NON_DOC_TEXT
+        or path_str.startswith(".claude/commands/")
+        or path_str.startswith(".codex/skills/")
         or path_str.startswith(".github/")
         or path_str.startswith("conductor/")
         or path_str.startswith("docs/superpowers/")

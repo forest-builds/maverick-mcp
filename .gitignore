@@ -52,6 +52,7 @@ venv.bak/
 
 # IDE files
 .idea/
+.claude/settings.local.json
 *.swp
 *.swo
 
@@ -71,8 +72,11 @@ Thumbs.db
 
 # Database files
 *.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
 
 # Docker local overrides
 docker-compose.override.yml
@@ -81,6 +85,9 @@ ta-lib-0.4.0-src.tar.gz
 
 # Personal financial data — never commit
 portfolio/
+vc/
+/data/
+docs/personal/
 
 # Secrets and local config
 .env.*

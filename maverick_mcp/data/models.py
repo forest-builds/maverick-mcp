@@ -170,6 +170,16 @@ def ensure_database_schema(force: bool = False) -> bool:
         if not force and _schema_initialized:
             return False
 
+        # Register every component model so create_all covers the full schema,
+        # not just the core models defined in this module. A single broken
+        # component module must not break core DB setup, so this is best-effort.
+        try:
+            import maverick_mcp.database.all_models  # noqa: F401
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Unable to import all component models for schema creation: %s", exc
+            )
+
         try:
             inspector = inspect(engine)
             existing_tables = set(inspector.get_table_names())
@@ -584,6 +594,7 @@ class MaverickStocks(Base, TimestampMixin):
         return {
             "stock_id": str(self.stock_id),
             "ticker": self.stock.ticker_symbol if self.stock else None,
+            "sector": self.stock.sector if self.stock else None,
             "date_analyzed": self.date_analyzed.isoformat()
             if self.date_analyzed
             else None,
@@ -701,6 +712,7 @@ class MaverickBearStocks(Base, TimestampMixin):
         return {
             "stock_id": str(self.stock_id),
             "ticker": self.stock.ticker_symbol if self.stock else None,
+            "sector": self.stock.sector if self.stock else None,
             "date_analyzed": self.date_analyzed.isoformat()
             if self.date_analyzed
             else None,
@@ -855,6 +867,7 @@ class SupplyDemandBreakoutStocks(Base, TimestampMixin):
         return {
             "stock_id": str(self.stock_id),
             "ticker": self.stock.ticker_symbol if self.stock else None,
+            "sector": self.stock.sector if self.stock else None,
             "date_analyzed": self.date_analyzed.isoformat()
             if self.date_analyzed
             else None,
