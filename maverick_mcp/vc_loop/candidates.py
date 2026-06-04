@@ -19,9 +19,15 @@ logger = logging.getLogger(__name__)
 
 # Neutral feature defaults for un-enriched / failed lookups. Kept consistent
 # with the scorer's NEUTRAL map (catalyst proximity is a genuine 0.0 signal).
-_NEUTRAL_TECHNICAL = 0.5
-_NEUTRAL_SENTIMENT = 0.5
+# Neutral defaults: unknown data is a mild negative signal, not a true neutral.
+# Using 0.3 instead of 0.5 ensures unenriched candidates score lower than
+# enriched ones, creating real spread instead of clustering around 62.5.
+_NEUTRAL_TECHNICAL = 0.3
+_NEUTRAL_SENTIMENT = 0.3
 _NEUTRAL_CATALYST = 0.0
+
+# Max combined_score produced by the screener (used for normalization).
+_SCREENER_MAX_SCORE = 125.0
 
 # Map textual technical outlook -> 0-1 strength, used when the technical
 # analysis returns a string outlook instead of a structured object.
@@ -82,7 +88,9 @@ def _base_candidate(stock: dict) -> Candidate | None:
     momentum = stock.get("momentum_score") or 0
 
     features = {
-        "screening_score": _clamp(float(combined) / 100.0),
+        # Normalize against screener max (125) not 100 — avoids score saturation
+        # where every top name scores 1.0 and clustering results.
+        "screening_score": _clamp(float(combined) / _SCREENER_MAX_SCORE),
         "momentum": _clamp(float(momentum) / 100.0),
         "technical_strength": _NEUTRAL_TECHNICAL,
         "sentiment_confidence": _NEUTRAL_SENTIMENT,
@@ -240,6 +248,59 @@ def _far_date():
     from datetime import date as _date
 
     return _date.max
+
+
+async def gather_portfolio_candidates(
+    tickers: list[str],
+    *,
+    on_screen: set[str] | None = None,
+    on_off_screen: set[str] | None = None,
+    days_ahead: int = 30,
+) -> list[Candidate]:
+    """Build candidates for held portfolio positions, regardless of screen status.
+
+    Used to ensure every held position gets a conviction score even if it didn't
+    surface through the screener. screening_score is set by screen status:
+      on accumulate screen → 0.8   (partial credit)
+      not on any screen   → 0.3   (mild negative — no screener signal)
+      on bear/off screen  → 0.0   (no signal, bearish)
+
+    All candidates are enriched (no top-N limit) since the universe is small.
+    """
+    on_screen = on_screen or set()
+    on_off_screen = on_off_screen or set()
+    candidates: list[Candidate] = []
+
+    for ticker in tickers:
+        t = ticker.upper()
+        if t in on_off_screen:
+            screen_signal = 0.0
+        elif t in on_screen:
+            screen_signal = 0.8
+        else:
+            screen_signal = 0.3
+
+        features: dict[str, float] = {
+            "screening_score": screen_signal,
+            "momentum": 0.5,
+            "technical_strength": _NEUTRAL_TECHNICAL,
+            "sentiment_confidence": _NEUTRAL_SENTIMENT,
+            "catalyst_proximity": _NEUTRAL_CATALYST,
+        }
+        cand = Candidate(
+            ticker=t,
+            sector=None,
+            features=features,
+            raw={},
+        )
+        candidates.append(cand)
+
+    if candidates:
+        catalysts_by_ticker = _fetch_catalysts([c.ticker for c in candidates], days_ahead)
+        for cand in candidates:
+            await _enrich(cand, catalysts_by_ticker.get(cand.ticker, []), days_ahead)
+
+    return candidates
 
 
 async def gather_candidates(

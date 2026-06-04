@@ -14,7 +14,11 @@ import logging
 from datetime import UTC, datetime
 
 from maverick_mcp.vc_loop import obsidian, scorer
-from maverick_mcp.vc_loop.candidates import Candidate, gather_candidates
+from maverick_mcp.vc_loop.candidates import (
+    Candidate,
+    gather_candidates,
+    gather_portfolio_candidates,
+)
 from maverick_mcp.vc_loop.ledger import ThesisService, to_dict
 
 logger = logging.getLogger(__name__)
@@ -84,12 +88,40 @@ async def run_vc_loop(
     Returns:
         A dict with the ranked proposals, ledger rows, and the pipeline note path.
     """
-    candidates = await gather_candidates(
+    # Step 1: screener candidates (niche growth universe, ADR-filtered)
+    screen_candidates = await gather_candidates(
         strategy=strategy,
         limit=limit,
         enrich_top_n=top_n,
         days_ahead=days_ahead,
     )
+    screened_tickers = {c.ticker for c in screen_candidates}
+
+    # Step 2: held portfolio positions not already in screener results.
+    # Ensures every position gets scored even if off the growth screen.
+    try:
+        from maverick_mcp.api.routers.investment_ops import (
+            _get_broker_positions,
+            _get_screen_sets,
+        )
+        positions = _get_broker_positions()
+        held_tickers = [p["ticker"].upper() for p in positions]
+        missing = [t for t in held_tickers if t not in screened_tickers]
+        if missing:
+            accumulate, _, off_screen = _get_screen_sets()
+            portfolio_candidates = await gather_portfolio_candidates(
+                missing,
+                on_screen=accumulate,
+                on_off_screen=off_screen,
+                days_ahead=days_ahead,
+            )
+        else:
+            portfolio_candidates = []
+    except Exception as exc:
+        logger.warning("Could not gather portfolio candidates: %s", exc)
+        portfolio_candidates = []
+
+    candidates = screen_candidates + portfolio_candidates
 
     if not candidates:
         return {
