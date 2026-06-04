@@ -17,32 +17,96 @@ from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
-# Target weight bands by screen tier (fraction of total portfolio)
-_BANDS: dict[str, tuple[float, float]] = {
-    "accumulate_t1": (0.04, 0.06),   # high-conviction Accumulate: 4-6%
-    "accumulate":    (0.02, 0.04),   # standard Accumulate: 2-4%
-    "watch":         (0.01, 0.03),   # Watch: hold, don't add
-    "off_screen":    (0.00, 0.005),  # no momentum: trim to near-zero
-    "unknown":       (0.00, 0.05),   # not in our universe: no opinion
-}
-_T1_CONVICTION_THRESHOLD = 70.0  # vc_loop conviction score for T1
+
+def _conviction_to_target_pct(
+    score: float | None,
+    on_accumulate: bool,
+    on_off_screen: bool,
+) -> float:
+    """
+    Map conviction score + screen status to a dynamic target portfolio weight.
+
+    Off-screen names always exit (0%). On-screen names scale continuously with
+    conviction so high-conviction positions earn more size automatically.
+
+    Curve (score → target weight):
+      ≥ 80  →  6–8%   (max conviction, core position)
+      65–79 →  4–6%   (high conviction)
+      50–64 →  2–4%   (moderate conviction)
+      35–49 →  0.5–2% (weak conviction, hold small)
+      < 35  →  0%     (exit)
+      on screen, no score → 3% default
+      not on screen → 2% cap (hold, no add)
+    """
+    if on_off_screen:
+        return 0.0
+    if not on_accumulate:
+        # Not in our universe — hold at small size, no add signal
+        if score and score >= 65:
+            return 0.02
+        return 0.015
+    if score is None:
+        return 0.03  # on screen but no vc_loop data yet
+    if score >= 80:
+        return min(0.08, 0.06 + (score - 80) / 20 * 0.02)
+    elif score >= 65:
+        return 0.04 + (score - 65) / 15 * 0.02
+    elif score >= 50:
+        return 0.02 + (score - 50) / 15 * 0.02
+    elif score >= 35:
+        return 0.005 + (score - 35) / 15 * 0.015
+    else:
+        return 0.0  # exit below conviction 35
 
 
-def _band_midpoint(tier: str) -> float:
-    lo, hi = _BANDS.get(tier, (0.0, 0.05))
-    return (lo + hi) / 2
+def _portfolio_stats(
+    positions: list[dict],
+    conviction_scores: dict[str, float],
+    accumulate: set,
+    off_screen: set,
+    total_value: float,
+) -> dict:
+    """Conviction-weighted intelligence metrics — used for the brief synthesis."""
+    if not positions or total_value <= 0:
+        return {}
+    weighted_sum = 0.0
+    weight_total = 0.0
+    high_conv_value = 0.0
+    off_screen_value = 0.0
+    on_screen_value = 0.0
+    no_score_value = 0.0
 
+    for pos in positions:
+        tkr = pos["ticker"].upper()
+        mv = pos["market_value"]
+        score = conviction_scores.get(tkr)
+        w = mv / total_value
+        if score is not None:
+            weighted_sum += score * w
+            weight_total += w
+            if score >= 65:
+                high_conv_value += mv
+        else:
+            no_score_value += mv
+        if tkr in off_screen:
+            off_screen_value += mv
+        elif tkr in accumulate:
+            on_screen_value += mv
 
-def _classify_tier(ticker: str, accumulate: set, watch: set, off_screen: set,
-                   conviction_scores: dict[str, float]) -> str:
-    if ticker in accumulate:
-        score = conviction_scores.get(ticker, 0.0)
-        return "accumulate_t1" if score >= _T1_CONVICTION_THRESHOLD else "accumulate"
-    if ticker in watch:
-        return "watch"
-    if ticker in off_screen:
-        return "off_screen"
-    return "unknown"
+    scored = sorted(
+        [{"ticker": p["ticker"].upper(), "score": conviction_scores[p["ticker"].upper()]}
+         for p in positions if p["ticker"].upper() in conviction_scores],
+        key=lambda x: x["score"], reverse=True,
+    )
+    return {
+        "portfolio_conviction_score": round(weighted_sum / weight_total, 1) if weight_total else None,
+        "high_conviction_pct": round(high_conv_value / total_value * 100, 1),
+        "on_screen_pct": round(on_screen_value / total_value * 100, 1),
+        "off_screen_held_pct": round(off_screen_value / total_value * 100, 1),
+        "no_conviction_data_pct": round(no_score_value / total_value * 100, 1),
+        "top_conviction": [s["ticker"] for s in scored[:5]],
+        "lowest_conviction": [s["ticker"] for s in scored if s["score"] < 50][:3],
+    }
 
 
 def _get_screen_sets() -> tuple[set, set, set]:
@@ -158,34 +222,31 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
     @mcp.tool(name="portfolio_rebalance_suggestions")
     def portfolio_rebalance_suggestions(
         total_portfolio_value: float | None = None,
+        available_cash: float = 0.0,
     ) -> dict[str, Any]:
         """
-        Generate specific rebalance actions for every position.
+        Conviction-driven rebalance with cash-first deployment.
 
-        Compares current position weights against Maverick target bands and
-        outputs exact dollar deltas per ticker so you know exactly what to
-        buy, trim, or exit.
-
-        Tiers and target weight bands:
-          accumulate_t1  (conviction >= 70): 4-6% of portfolio
-          accumulate     (on screen):        2-4%
-          watch          (no add signal):    1-3%, hold
-          off_screen     (no momentum):      0-0.5%, exit candidate
-          unknown        (not in universe):  no opinion
+        Position targets are computed from vc_loop conviction scores on a
+        continuous curve (not fixed bands), so high-conviction names earn more
+        size automatically. Available cash is deployed into underweight positions
+        before any trimming is suggested — trims are only recommended when adds
+        exceed available liquidity, or for concentration reduction.
 
         Args:
-            total_portfolio_value: Override total portfolio value in USD.
-                Computed from broker positions if omitted.
+            total_portfolio_value: Override total portfolio value (equity only).
+            available_cash: Idle cash available to deploy. Pass from broker
+                account_summary for accurate cash-first logic.
 
         Returns:
-            actions: list of per-ticker rebalance actions with delta_dollars
-            summary: counts and total portfolio value
+            actions: per-ticker actions with conviction target, delta, and funding source
+            cash_summary: how much cash deploys, whether trims are needed for funding
         """
         positions = _get_broker_positions()
         if not positions:
             return {"error": "No positions found. Check broker connection."}
 
-        accumulate, watch, off_screen = _get_screen_sets()
+        accumulate, _, off_screen = _get_screen_sets()
         conviction_scores = _get_conviction_scores()
 
         total_value = total_portfolio_value or sum(p["market_value"] for p in positions)
@@ -197,9 +258,11 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
             ticker = pos["ticker"].upper()
             mv = pos["market_value"]
             current_pct = mv / total_value
+            score = conviction_scores.get(ticker)
 
-            tier = _classify_tier(ticker, accumulate, watch, off_screen, conviction_scores)
-            target_pct = _band_midpoint(tier)
+            on_acc = ticker in accumulate
+            on_off = ticker in off_screen
+            target_pct = _conviction_to_target_pct(score, on_acc, on_off)
             delta_pct = target_pct - current_pct
             delta_dollars = delta_pct * total_value
 
@@ -210,31 +273,29 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
             else:
                 action = "trim" if target_pct > 0 else "exit"
 
-            lo, hi = _BANDS.get(tier, (0.0, 0.05))
-            cur_pct_str = f"{current_pct*100:.1f}%"
-            tgt_pct_str = f"{lo*100:.0f}–{hi*100:.0f}%"
-            score = conviction_scores.get(ticker)
-            score_str = f" · conviction {score:.0f}" if score else ""
+            cur_s = f"{current_pct*100:.1f}%"
+            tgt_s = f"{target_pct*100:.1f}%"
+            score_s = f" · conviction {score:.0f}" if score else " · no vc_loop score"
             if action == "exit":
-                rationale = f"Off screen, no momentum — exit fully ({cur_pct_str} → 0%)"
+                rationale = f"Off screen — exit fully ({cur_s} → 0%)"
             elif action == "trim":
                 rationale = (
-                    f"{'Accumulate' if 'accumulate' in tier else tier.replace('_',' ').title()}"
-                    f" but {cur_pct_str} vs {tgt_pct_str} target{score_str}"
-                    f" — trim ~${abs(delta_dollars):.0f}"
+                    f"{'On screen' if on_acc else 'Not in universe'}, {cur_s} → {tgt_s} target"
+                    f"{score_s} — trim ${abs(delta_dollars):.0f} (concentration reduction)"
                 )
             elif action == "add":
                 rationale = (
-                    f"Accumulate, underweight: {cur_pct_str} vs {tgt_pct_str} target{score_str}"
-                    f" — add ~${delta_dollars:.0f}"
+                    f"On screen, underweight: {cur_s} → {tgt_s} target"
+                    f"{score_s} — add ${delta_dollars:.0f}"
                 )
             else:
-                rationale = f"Within target band {tgt_pct_str} — hold"
+                rationale = f"At target {tgt_s}{score_s} — hold"
 
             actions.append({
                 "ticker": ticker,
-                "tier": tier,
-                "conviction_score": conviction_scores.get(ticker),
+                "on_screen": on_acc,
+                "on_off_screen": on_off,
+                "conviction_score": score,
                 "current_value": round(mv, 2),
                 "current_pct": round(current_pct * 100, 2),
                 "target_pct": round(target_pct * 100, 2),
@@ -243,17 +304,66 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 "rationale": rationale,
             })
 
-        actions.sort(key=lambda x: abs(x["delta_dollars"]), reverse=True)
-
         exits = [a for a in actions if a["action"] == "exit"]
-        trims = [a for a in actions if a["action"] == "trim"]
-        adds = [a for a in actions if a["action"] == "add"]
+        adds_raw = sorted(
+            [a for a in actions if a["action"] == "add"],
+            key=lambda a: (a.get("conviction_score") or 0), reverse=True,
+        )
+        trims_raw = sorted(
+            [a for a in actions if a["action"] == "trim"],
+            key=lambda a: abs(a["delta_dollars"]), reverse=True,
+        )
         holds = [a for a in actions if a["action"] == "hold"]
 
+        # Cash-first: fund adds from available cash before trimming
+        remaining_cash = available_cash
+        adds: list[dict] = []
+        for add in adds_raw:
+            needed = add["delta_dollars"]
+            if remaining_cash >= needed:
+                add["funded_by"] = "cash"
+                add["cash_used"] = round(needed, 2)
+                remaining_cash -= needed
+            elif remaining_cash > 0:
+                add["funded_by"] = "cash_and_trim"
+                add["cash_used"] = round(remaining_cash, 2)
+                add["still_needs"] = round(needed - remaining_cash, 2)
+                remaining_cash = 0
+            else:
+                add["funded_by"] = "requires_trim"
+                add["cash_used"] = 0.0
+                add["still_needs"] = round(needed, 2)
+            adds.append(add)
+
+        trim_needed_for_funding = round(sum(
+            a.get("still_needs", 0) for a in adds
+            if a.get("funded_by") in ("cash_and_trim", "requires_trim")
+        ), 2)
+
+        # Tag trims: funding vs concentration reduction
+        trims: list[dict] = []
+        cumulative = 0.0
+        for trim in trims_raw:
+            if cumulative < trim_needed_for_funding:
+                trim["purpose"] = "funding"
+                cumulative += abs(trim["delta_dollars"])
+            else:
+                trim["purpose"] = "concentration_reduction"
+            trims.append(trim)
+
+        all_actions = exits + trims + adds + holds
         return {
             "as_of": datetime.now(UTC).isoformat(),
             "total_portfolio_value": round(total_value, 2),
-            "actions": actions,
+            "available_cash": round(available_cash, 2),
+            "actions": all_actions,
+            "cash_summary": {
+                "cash_available": round(available_cash, 2),
+                "cash_to_deploy": round(available_cash - remaining_cash, 2),
+                "cash_remaining": round(remaining_cash, 2),
+                "trim_needed_for_funding": trim_needed_for_funding,
+                "trims_are_for_concentration_only": trim_needed_for_funding == 0,
+            },
             "summary": {
                 "exit_count": len(exits),
                 "trim_count": len(trims),
@@ -312,10 +422,13 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                         if cash_balance else None,
         }
 
-        # --- Rebalance (computed first so screen section can reference sizing) ---
+        # --- Rebalance (cash-first: pass actual cash so adds are funded from cash) ---
         action_by_ticker: dict[str, dict] = {}
         try:
-            rebalance = portfolio_rebalance_suggestions(total_portfolio_value=total_value)
+            rebalance = portfolio_rebalance_suggestions(
+                total_portfolio_value=total_value,
+                available_cash=cash_balance or 0.0,
+            )
             all_actions = rebalance.get("actions", [])
             action_by_ticker = {a["ticker"]: a for a in all_actions}
             exits = [a for a in all_actions if a["action"] == "exit"]
@@ -336,9 +449,7 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 }
 
             brief["rebalance"] = {
-                "capital_freed": capital_freed,
-                "capital_to_deploy": capital_needed,
-                "net": round(capital_needed - capital_freed, 2),
+                "cash_summary": rebalance.get("cash_summary", {}),
                 "exits": [_action_detail(a) for a in exits],
                 "top_trims": [_action_detail(a) for a in trims[:6]],
                 "top_adds": [_action_detail(a) for a in adds[:6]],
@@ -346,6 +457,17 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
         except Exception as e:
             brief["rebalance"] = {"error": str(e)}
             exits, trims, adds = [], [], []
+
+        # --- Portfolio intelligence stats ---
+        try:
+            accumulate_for_stats, _, off_screen_for_stats = _get_screen_sets()
+            conviction_scores = _get_conviction_scores()
+            brief["stats"] = _portfolio_stats(
+                positions, conviction_scores,
+                accumulate_for_stats, off_screen_for_stats, total_value,
+            )
+        except Exception as e:
+            brief["stats"] = {"error": str(e)}
 
         # --- Screen results (with per-position sizing) ---
         accumulate, _, off_screen = _get_screen_sets()
