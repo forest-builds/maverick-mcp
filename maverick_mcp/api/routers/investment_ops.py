@@ -180,6 +180,43 @@ def _get_conviction_scores() -> dict[str, float]:
         return {}
 
 
+def _save_brief_snapshot(brief: dict[str, Any]) -> None:
+    """Persist a brief run to brief_snapshots for drift tracking."""
+    from maverick_mcp.data.models import SessionLocal
+    from maverick_mcp.vc_loop.models import BriefSnapshot
+
+    portfolio = brief.get("portfolio", {})
+    stats = brief.get("stats", {})
+    rebalance = brief.get("rebalance", {})
+    cash_summary = rebalance.get("cash_summary", {})
+    total = portfolio.get("total_value") or 0
+    equity = portfolio.get("equity_value") or 0
+    cash = portfolio.get("cash_balance")
+
+    snap = BriefSnapshot(
+        equity_value=equity,
+        cash_balance=cash,
+        total_value=total,
+        position_count=portfolio.get("position_count"),
+        deployed_pct=round((1 - (cash or 0) / total) * 100, 1) if total else None,
+        portfolio_conviction_score=stats.get("portfolio_conviction_score"),
+        high_conviction_pct=stats.get("high_conviction_pct"),
+        on_screen_pct=stats.get("on_screen_pct"),
+        off_screen_held_pct=stats.get("off_screen_held_pct"),
+        positions_json=brief.get("portfolio"),
+        actions_json=(
+            rebalance.get("exits", []) +
+            rebalance.get("top_trims", []) +
+            rebalance.get("top_adds", [])
+        ),
+        screen_json=brief.get("screen"),
+        new_opportunities_json=brief.get("new_opportunities"),
+    )
+    with SessionLocal() as session:
+        session.add(snap)
+        session.commit()
+
+
 def _get_broker_positions() -> list[dict]:
     """Return current positions from Schwab; fall back to local portfolio."""
     try:
@@ -495,7 +532,7 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
         # --- New opportunities: niche thematic names not in book ---
         brief["new_opportunities"] = _get_new_opportunities(held_tickers, limit=6)
 
-        # --- Risk: basic concentration from positions (no nested import needed) ---
+        # --- Risk: basic concentration from positions ---
         try:
             pos_by_value = sorted(positions, key=lambda p: p["market_value"], reverse=True)
             top5_value = sum(p["market_value"] for p in pos_by_value[:5])
@@ -509,7 +546,100 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
         except Exception as e:
             brief["risk"] = {"error": str(e)}
 
+        # --- Persist snapshot (non-blocking) ---
+        try:
+            _save_brief_snapshot(brief)
+        except Exception as e:
+            logger.warning("Brief snapshot save failed (non-fatal): %s", e)
+
         return brief
+
+    @mcp.tool(name="brief_history")
+    def brief_history(limit: int = 14) -> dict[str, Any]:
+        """
+        Portfolio drift report — compares current state to past brief snapshots.
+
+        Returns the last N snapshots so you can see how conviction score,
+        deployment %, cash, and regime have evolved over time. Flags if
+        the portfolio conviction score is trending down (early warning),
+        if cash has been sitting idle across multiple runs, or if off-screen
+        held percentage is growing.
+
+        Args:
+            limit: Number of past snapshots to return (default 14 = ~2 weeks daily)
+        """
+        try:
+            from maverick_mcp.data.models import SessionLocal
+            from maverick_mcp.vc_loop.models import BriefSnapshot
+
+            with SessionLocal() as session:
+                rows = (
+                    session.query(BriefSnapshot)
+                    .order_by(BriefSnapshot.snapshot_at.desc())
+                    .limit(limit)
+                    .all()
+                )
+
+            if not rows:
+                return {"note": "No snapshots yet — run /brief to start building history."}
+
+            snapshots = [
+                {
+                    "date": r.snapshot_at.strftime("%Y-%m-%d %H:%M") if r.snapshot_at else None,
+                    "total_value": r.total_value,
+                    "cash_balance": r.cash_balance,
+                    "deployed_pct": r.deployed_pct,
+                    "conviction_score": r.portfolio_conviction_score,
+                    "high_conviction_pct": r.high_conviction_pct,
+                    "off_screen_held_pct": r.off_screen_held_pct,
+                    "regime": r.regime,
+                    "position_count": r.position_count,
+                }
+                for r in rows
+            ]
+
+            # Drift analysis — compare latest vs oldest in window
+            latest = snapshots[0]
+            oldest = snapshots[-1]
+
+            def _delta(key: str) -> float | None:
+                a = latest.get(key)
+                b = oldest.get(key)
+                return round(a - b, 2) if a is not None and b is not None else None
+
+            drift = {
+                "conviction_score_delta": _delta("conviction_score"),
+                "total_value_delta": _delta("total_value"),
+                "deployed_pct_delta": _delta("deployed_pct"),
+                "off_screen_held_delta": _delta("off_screen_held_pct"),
+                "window_days": len(rows),
+            }
+
+            # Alerts
+            alerts = []
+            cs_delta = drift["conviction_score_delta"]
+            if cs_delta is not None and cs_delta < -3:
+                alerts.append(f"Conviction score declining: {cs_delta:+.1f} pts over {len(rows)} runs")
+            idle_cash = all(
+                s["deployed_pct"] is not None and s["deployed_pct"] < 85
+                for s in snapshots[:3]
+            )
+            if idle_cash:
+                alerts.append("Cash idle across last 3 runs — deployment stalled?")
+            os_delta = drift["off_screen_held_delta"]
+            if os_delta is not None and os_delta > 2:
+                alerts.append(f"Off-screen held % growing: +{os_delta:.1f}% — exits overdue?")
+
+            return {
+                "snapshots": snapshots,
+                "drift": drift,
+                "alerts": alerts,
+                "as_of": datetime.now(UTC).isoformat(),
+            }
+
+        except Exception as e:
+            logger.error("brief_history error: %s", e)
+            return {"error": str(e)}
 
     @mcp.tool(name="conviction_diff")
     def conviction_diff(days_back: int = 7) -> dict[str, Any]:

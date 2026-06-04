@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Index, String, Text
+from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from maverick_mcp.data.models import TimestampMixin
@@ -53,3 +53,48 @@ class ThesisLedger(Base, TimestampMixin):
         Index("idx_vc_thesis_ticker", "ticker"),
         Index("idx_vc_thesis_status", "status"),
     )
+
+
+class BriefSnapshot(Base, TimestampMixin):
+    """Portfolio-level intelligence snapshot captured on each /brief run.
+
+    Enables drift detection (conviction score over time), action accountability
+    (what was recommended vs what was done), and regime-correlated performance
+    analysis. Complements ThesisLedger, which tracks per-ticker conviction.
+    """
+
+    __tablename__ = "brief_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
+
+    # Portfolio state
+    equity_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    position_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deployed_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Intelligence metrics
+    portfolio_conviction_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_conviction_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    on_screen_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    off_screen_held_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Regime at time of snapshot
+    regime: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    regime_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # CIO synthesis text verbatim
+    synthesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Full blobs for replay / diff
+    positions_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    actions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    screen_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    new_opportunities_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
