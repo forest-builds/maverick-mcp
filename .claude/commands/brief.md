@@ -1,32 +1,45 @@
-# Daily Investment Brief
+# Brief
 
-Call `investment_brief` from maverick-mcp. Then render the output using EXACTLY this template — no additions, no reordering, no extra prose.
+Call `investment_brief` from maverick-mcp. Render using EXACTLY this layout — no additions, no reordering, no disclaimers.
 
 ```
-━━━ MAVERICK BRIEF · {DATE} ━━━━━━━━━━━━━━━━━━━━
+BRIEF · {DATE}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PORTFOLIO   ${EQUITY}  +  ${CASH} cash  =  ${TOTAL}  ({CASH_PCT}% deployed)
-            {N} positions  ·  largest: {TICKER} {PCT}%  ·  top-5: {TOP5_PCT}%
+  Equity    ${EQUITY}   {N} positions
+  Cash      ${CASH}     {CASH_PCT}% of total
+  Total     ${TOTAL}    {DEPLOYED_PCT}% deployed
 
 SCREEN
-  ✓ ACC   {HELD_ACCUMULATE}
-  — NONE  {HELD_NO_SIGNAL}
-  ✗ EXIT  {HELD_OFF_SCREEN}
+  ✓ {TICKER}  {CUR_PCT}% → {TARGET_PCT}%  {DELTA_STR}  — {WHY}
+  (one line per held accumulate position, sorted by delta_dollars desc)
+
+  — {TICKER}  {CUR_PCT}%  hold, no signal
+  (one line per held_no_signal)
+
+  ✗ {TICKER}  {CUR_PCT}% → 0%  ${EXIT_AMT} — {WHY}
+  (one line per held_off_screen — all exits are full unless delta > -$50)
 
 CAPITAL FLOW
-  FREE     ${FREED}    {EXIT_TICKERS}  {TRIM_TICKERS}
-  DEPLOY   ${DEPLOY}   {ADD_TICKERS}
-  NEW OPP  {NEW_OPPS}
+  FREE  ${FREED}
+    {EXIT lines first, then TRIM lines}
+    TRIM  {TICKER}  {CUR_PCT}% → {TARGET_PCT}%  -${AMT}  — {WHY}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DEPLOY  ${DEPLOY}
+    ADD  {TICKER}  {CUR_PCT}% → {TARGET_PCT}%  +${AMT}  — {WHY}
+
+  NEW OPP  (niche / thematic — not widely followed)
+    {TICKER}  — {WHY from screener: pattern · ADR · score}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 Rules:
 - DATE: today's date, e.g. "2026-06-03"
-- CASH: show as "—" if unavailable
-- DEPLOYED = 100 - cash_pct; if cash unknown say "deployment unknown"
-- FREE: exits first (label EXIT), then top trims (label TRIM). Format: `TICKER -$AMOUNT`
-- DEPLOY: underweight accumulate names. Format: `TICKER +$AMOUNT`
-- NEW OPP: screener hits not currently held, max 6 tickers, no dollar amounts
-- If a section has no data: show "—" not an explanation
-- No disclaimers. No extra text outside the template.
+- DELTA_STR: "+$X" if add, "-$X" if trim, "hold" if within band
+- Exit = full liquidation (off-screen means no signal, 0% target)
+- Trim = partial reduction to band midpoint, position stays open
+- WHY must always be present on every line — pull from the `why` field
+- NEW OPP: max 6, niche names only (sector=None from screener), skip if none
+- If cash unavailable: show "—" not an explanation
+- No extra text outside the template

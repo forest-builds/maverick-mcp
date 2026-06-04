@@ -46,27 +46,51 @@ def _classify_tier(ticker: str, accumulate: set, watch: set, off_screen: set,
 
 
 def _get_screen_sets() -> tuple[set, set, set]:
-    """Return (accumulate, watch, off_screen) ticker sets from latest screen."""
+    """Return (accumulate, watch, off_screen) ticker sets — ADR-filtered growth names only."""
     try:
         from maverick_mcp.api.routers.screening import (
-            get_all_screening_recommendations,
+            get_maverick_stocks,
+            get_maverick_bear_stocks,
         )
-        result = get_all_screening_recommendations()
-        accumulate: set = set()
-        off_screen: set = set()
-        for s in result.get("maverick_stocks", []):
-            tkr = (s.get("ticker") or "").upper()
-            if tkr:
-                accumulate.add(tkr)
-        for s in result.get("maverick_bear_stocks", []):
-            tkr = (s.get("ticker") or "").upper()
-            if tkr:
-                off_screen.add(tkr)
-        # Watch = held names not on either list; computed at call site
+        bull = get_maverick_stocks(limit=100, min_adr_pct=3.5)
+        bear = get_maverick_bear_stocks(limit=100)
+        accumulate = {(s.get("ticker") or "").upper() for s in bull.get("stocks", []) if s.get("ticker")}
+        off_screen  = {(s.get("ticker") or "").upper() for s in bear.get("stocks", []) if s.get("ticker")}
         return accumulate, set(), off_screen
     except Exception as e:
         logger.warning("Could not load screen sets: %s", e)
         return set(), set(), set()
+
+
+def _get_new_opportunities(held_tickers: set, limit: int = 6) -> list[dict]:
+    """Return niche screener hits not in the book, with one-line rationale."""
+    try:
+        from maverick_mcp.api.routers.screening import get_maverick_stocks
+        result = get_maverick_stocks(limit=100, min_adr_pct=4.0)
+        opps = []
+        for s in result.get("stocks", []):
+            tkr = (s.get("ticker") or "").upper()
+            if not tkr or tkr in held_tickers:
+                continue
+            # Prefer niche names (sector=None) over well-known large caps
+            sector = s.get("sector")
+            if sector is not None:
+                continue  # skip named-sector stocks for new opps; they're known names
+            pattern = s.get("pattern") or "Uptrend"
+            adr = s.get("adr_pct") or 0
+            score = s.get("combined_score") or 0
+            opps.append({
+                "ticker": tkr,
+                "why": f"{pattern} · ADR {adr:.1f}% · score {score}",
+                "adr_pct": adr,
+                "combined_score": score,
+            })
+            if len(opps) >= limit:
+                break
+        return opps
+    except Exception as e:
+        logger.warning("Could not load new opportunities: %s", e)
+        return []
 
 
 def _get_conviction_scores() -> dict[str, float]:
@@ -187,13 +211,25 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 action = "trim" if target_pct > 0 else "exit"
 
             lo, hi = _BANDS.get(tier, (0.0, 0.05))
-            rationale = (
-                f"{tier.replace('_', ' ').title()} — "
-                f"target band {lo*100:.0f}-{hi*100:.0f}%; "
-                f"currently at {current_pct*100:.1f}%"
-            )
-            if tier == "off_screen":
-                rationale += ". No momentum signal — exit candidate."
+            cur_pct_str = f"{current_pct*100:.1f}%"
+            tgt_pct_str = f"{lo*100:.0f}–{hi*100:.0f}%"
+            score = conviction_scores.get(ticker)
+            score_str = f" · conviction {score:.0f}" if score else ""
+            if action == "exit":
+                rationale = f"Off screen, no momentum — exit fully ({cur_pct_str} → 0%)"
+            elif action == "trim":
+                rationale = (
+                    f"{'Accumulate' if 'accumulate' in tier else tier.replace('_',' ').title()}"
+                    f" but {cur_pct_str} vs {tgt_pct_str} target{score_str}"
+                    f" — trim ~${abs(delta_dollars):.0f}"
+                )
+            elif action == "add":
+                rationale = (
+                    f"Accumulate, underweight: {cur_pct_str} vs {tgt_pct_str} target{score_str}"
+                    f" — add ~${delta_dollars:.0f}"
+                )
+            else:
+                rationale = f"Within target band {tgt_pct_str} — hold"
 
             actions.append({
                 "ticker": ticker,
@@ -276,25 +312,12 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                         if cash_balance else None,
         }
 
-        # --- Screen results ---
-        accumulate, _, off_screen = _get_screen_sets()
-        held_accumulate = accumulate & held_tickers
-        held_off_screen = off_screen & held_tickers
-        held_no_signal = held_tickers - accumulate - off_screen
-        brief["screen"] = {
-            "held_accumulate": sorted(held_accumulate),
-            "held_no_signal": sorted(held_no_signal),
-            "held_off_screen": sorted(held_off_screen),
-        }
-
-        # --- New opportunities (not in book, on accumulate screen) ---
-        new_opps = sorted(accumulate - held_tickers)
-        brief["new_opportunities"] = new_opps[:10]
-
-        # --- Rebalance: full capital flow ---
+        # --- Rebalance (computed first so screen section can reference sizing) ---
+        action_by_ticker: dict[str, dict] = {}
         try:
             rebalance = portfolio_rebalance_suggestions(total_portfolio_value=total_value)
             all_actions = rebalance.get("actions", [])
+            action_by_ticker = {a["ticker"]: a for a in all_actions}
             exits = [a for a in all_actions if a["action"] == "exit"]
             trims = [a for a in all_actions if a["action"] == "trim"]
             adds  = [a for a in all_actions if a["action"] == "add"]
@@ -302,16 +325,53 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
             capital_freed = round(sum(abs(a["delta_dollars"]) for a in exits + trims), 2)
             capital_needed = round(sum(a["delta_dollars"] for a in adds), 2)
 
+            def _action_detail(a: dict) -> dict:
+                return {
+                    "ticker": a["ticker"],
+                    "current_pct": a.get("current_pct"),
+                    "target_pct": a.get("target_pct"),
+                    "delta_dollars": a.get("delta_dollars"),
+                    "conviction_score": a.get("conviction_score"),
+                    "why": a.get("rationale", ""),
+                }
+
             brief["rebalance"] = {
                 "capital_freed": capital_freed,
                 "capital_to_deploy": capital_needed,
                 "net": round(capital_needed - capital_freed, 2),
-                "exits": [{"ticker": a["ticker"], "delta": a["delta_dollars"]} for a in exits],
-                "top_trims": [{"ticker": a["ticker"], "delta": a["delta_dollars"], "rationale": a["rationale"]} for a in trims[:5]],
-                "top_adds": [{"ticker": a["ticker"], "delta": a["delta_dollars"], "rationale": a["rationale"]} for a in adds[:5]],
+                "exits": [_action_detail(a) for a in exits],
+                "top_trims": [_action_detail(a) for a in trims[:6]],
+                "top_adds": [_action_detail(a) for a in adds[:6]],
             }
         except Exception as e:
             brief["rebalance"] = {"error": str(e)}
+            exits, trims, adds = [], [], []
+
+        # --- Screen results (with per-position sizing) ---
+        accumulate, _, off_screen = _get_screen_sets()
+        held_accumulate = accumulate & held_tickers
+        held_off_screen = off_screen & held_tickers
+        held_no_signal = held_tickers - accumulate - off_screen
+
+        def _screen_detail(tkr: str) -> dict:
+            a = action_by_ticker.get(tkr, {})
+            return {
+                "ticker": tkr,
+                "current_pct": a.get("current_pct"),
+                "target_pct": a.get("target_pct"),
+                "delta_dollars": a.get("delta_dollars"),
+                "action": a.get("action", "hold"),
+                "why": a.get("rationale", ""),
+            }
+
+        brief["screen"] = {
+            "held_accumulate": [_screen_detail(t) for t in sorted(held_accumulate)],
+            "held_no_signal":  [_screen_detail(t) for t in sorted(held_no_signal)],
+            "held_off_screen": [_screen_detail(t) for t in sorted(held_off_screen)],
+        }
+
+        # --- New opportunities: niche thematic names not in book ---
+        brief["new_opportunities"] = _get_new_opportunities(held_tickers, limit=6)
 
         # --- Risk: basic concentration from positions (no nested import needed) ---
         try:
