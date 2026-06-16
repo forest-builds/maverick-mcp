@@ -51,6 +51,7 @@ async def run_vc_loop_pass() -> int:
 def save_snapshot() -> bool:
     """Pull live positions and save a brief snapshot to brief_snapshots."""
     from maverick_mcp.api.routers.investment_ops import (
+        _fetch_corr_and_vols,
         _get_broker_positions,
         _get_conviction_scores,
         _get_new_opportunities,
@@ -58,6 +59,7 @@ def save_snapshot() -> bool:
         _portfolio_stats,
         _save_brief_snapshot,
     )
+    from maverick_mcp.vc_loop import diversification as dv
 
     positions = _get_broker_positions()
     if not positions:
@@ -69,6 +71,27 @@ def save_snapshot() -> bool:
     accumulate, _, off_screen = _get_screen_sets()
     conviction_scores = _get_conviction_scores()
 
+    # Diversification (Dalio layer) — track effective bets over time.
+    diversification: dict = {"applied": False}
+    try:
+        tickers = [p["ticker"].upper() for p in positions]
+        weights = {p["ticker"].upper(): p["market_value"] / total_value for p in positions}
+        corr, vols = _fetch_corr_and_vols(tickers)
+        if corr:
+            clusters = dv.cluster_positions(corr, list(corr.keys()))
+            _, caps_log = dv.apply_cluster_caps(
+                {t: weights.get(t, 0) for t in tickers}, clusters
+            )
+            eb = dv.effective_bets(weights, corr)
+            diversification = {
+                "applied": True,
+                "effective_bets": round(eb, 1),
+                "grade": dv.diversification_grade(eb),
+                "clusters_capped": caps_log,
+            }
+    except Exception as exc:
+        logger.warning("Diversification calc failed: %s", exc)
+
     brief: dict = {
         "generated_at": datetime.now(UTC).isoformat(),
         "portfolio": {
@@ -79,6 +102,7 @@ def save_snapshot() -> bool:
         "stats": _portfolio_stats(
             positions, conviction_scores, accumulate, off_screen, total_value
         ),
+        "diversification": diversification,
         "screen": {
             "held_accumulate": sorted(accumulate & held_tickers),
             "held_off_screen": sorted(off_screen & held_tickers),
@@ -88,10 +112,11 @@ def save_snapshot() -> bool:
     }
     _save_brief_snapshot(brief)
     logger.info(
-        "Snapshot saved: equity=$%.0f positions=%d conviction=%.1f",
+        "Snapshot saved: equity=$%.0f positions=%d conviction=%.1f effective_bets=%s",
         total_value,
         len(positions),
         brief["stats"].get("portfolio_conviction_score") or 0,
+        diversification.get("effective_bets", "n/a"),
     )
     return True
 

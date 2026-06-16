@@ -31,10 +31,11 @@ Your AI-native VC firm, accessible from Claude Code.
 ## Tools Available (call directly or through commands)
 
 **Portfolio**
-- `portfolio_rebalance_suggestions` — sizing deltas
+- `portfolio_rebalance_suggestions` — conviction + correlation-aware sizing deltas (cluster caps, risk parity)
+- `portfolio_diversification` — Dalio layer: effective bets, correlated clusters, risk contribution, A–F grade
 - `portfolio_get_my_portfolio` — local portfolio state
 - `portfolio_risk_adjusted_analysis` — risk-weighted view
-- `portfolio_portfolio_correlation_analysis` — concentration/correlation
+- `portfolio_portfolio_correlation_analysis` — raw correlation matrix
 
 **Broker**
 - `broker_positions` — live Schwab holdings
@@ -71,9 +72,24 @@ Your AI-native VC firm, accessible from Claude Code.
 **Intelligence**
 - `investment_brief` — daily briefing (used by `/brief`)
 - `conviction_diff` — ledger delta (used by `/diff`)
+- `brief_history` — portfolio drift over time: conviction, deployment, effective bets
 - `data_get_news_sentiment` — news sentiment for a ticker
 - `get_upcoming_catalysts` — upcoming events for holdings
 - `watchlist_brief` — opportunity pipeline summary
+
+## The Closed Loop
+
+The system runs itself even when you're away (launchd, weekdays 8am + 4:30pm):
+
+1. **MEASURE** — `daily_intelligence_run.py` scores the universe (vc_loop) and snapshots the book
+2. **ADJUST** — rebalance applies conviction curve → cluster caps → risk-parity tilt
+3. **SURFACE** — `/brief` renders one cohesive CIO picture with the Dalio diversification lens
+4. **RECORD** — every run writes to `brief_snapshots` (conviction, deployment, effective bets)
+5. **LEARN** — `/diff` + `brief_history` show drift over time so you see the book improving
+
+Dalio principle baked in: conviction sizes a bet, but **correlation caps it**. Five
+space stocks are one bet, not five — the engine enforces a ~20% per-cluster budget
+and tracks effective bets against a 15-bet diversification target.
 
 ## Principle
 

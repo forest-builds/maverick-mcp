@@ -1,10 +1,12 @@
 """
 Investment operations tools — the action layer.
 
-Three tools that turn analysis into decisions:
-  portfolio_rebalance_suggestions  — exact $ deltas per position
+Tools that turn analysis into decisions:
+  portfolio_rebalance_suggestions  — exact $ deltas per position (conviction + correlation aware)
   investment_brief                 — daily CIO briefing in one call
+  portfolio_diversification        — Dalio layer: effective bets, clusters, risk parity
   conviction_diff                  — what changed since last vc_loop run
+  brief_history                    — portfolio drift over time
 """
 
 from __future__ import annotations
@@ -113,8 +115,8 @@ def _get_screen_sets() -> tuple[set, set, set]:
     """Return (accumulate, watch, off_screen) ticker sets — ADR-filtered growth names only."""
     try:
         from maverick_mcp.api.routers.screening import (
-            get_maverick_stocks,
             get_maverick_bear_stocks,
+            get_maverick_stocks,
         )
         bull = get_maverick_stocks(limit=100, min_adr_pct=3.5)
         bear = get_maverick_bear_stocks(limit=100)
@@ -157,6 +159,59 @@ def _get_new_opportunities(held_tickers: set, limit: int = 6) -> list[dict]:
         return []
 
 
+def _fetch_corr_and_vols(
+    tickers: list[str], days: int = 252
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    """Fetch price history once; return (correlation matrix, annualized vols).
+
+    Both are derived from the same daily-returns frame so they're consistent.
+    Names with insufficient data are dropped from the matrix but kept in vols
+    via a neutral default at the call site.
+    """
+    import pandas as pd
+
+    from maverick_mcp.providers.stock_data import StockDataProvider
+
+    provider = StockDataProvider()
+    end = datetime.now(UTC)
+    start = end - timedelta(days=days)
+    closes: dict[str, Any] = {}
+    for t in tickers:
+        try:
+            df = provider.get_stock_data(
+                t, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+            )
+            col = "close" if "close" in df.columns else "Close"
+            if df is not None and not df.empty and col in df.columns:
+                series = df[col].copy()
+                # Normalize index to tz-naive dates so series from different
+                # sources (cache vs yfinance) align in a single DataFrame.
+                idx = pd.to_datetime(series.index)
+                if getattr(idx, "tz", None) is not None:
+                    idx = idx.tz_localize(None)
+                series.index = idx.normalize()
+                closes[t] = series[~series.index.duplicated(keep="last")]
+        except Exception as exc:
+            logger.warning("corr fetch failed for %s: %s", t, exc)
+
+    if len(closes) < 2:
+        return {}, {}
+
+    prices = pd.DataFrame(closes)
+    rets = prices.pct_change().dropna()
+    if len(rets) < 30:
+        return {}, {}
+
+    corr_df = rets.corr()
+    corr: dict[str, dict[str, float]] = {
+        a: {b: float(corr_df.loc[a, b]) for b in corr_df.columns}
+        for a in corr_df.index
+    }
+    # Annualized volatility (std of daily returns × sqrt(252))
+    vols = {t: float(rets[t].std() * (252 ** 0.5)) for t in rets.columns}
+    return corr, vols
+
+
 def _get_conviction_scores() -> dict[str, float]:
     """Return latest conviction score per ticker from the vc_thesis_ledger."""
     try:
@@ -188,10 +243,16 @@ def _save_brief_snapshot(brief: dict[str, Any]) -> None:
     portfolio = brief.get("portfolio", {})
     stats = brief.get("stats", {})
     rebalance = brief.get("rebalance", {})
-    cash_summary = rebalance.get("cash_summary", {})
+    div = brief.get("diversification", {})
     total = portfolio.get("total_value") or 0
     equity = portfolio.get("equity_value") or 0
     cash = portfolio.get("cash_balance")
+
+    div_grade = (div.get("grade") or {}) if isinstance(div, dict) else {}
+    clusters_capped = div.get("clusters_capped", []) if isinstance(div, dict) else []
+    largest_cluster_pct = max(
+        (c.get("wanted_pct", 0) for c in clusters_capped), default=None
+    )
 
     snap = BriefSnapshot(
         equity_value=equity,
@@ -203,6 +264,9 @@ def _save_brief_snapshot(brief: dict[str, Any]) -> None:
         high_conviction_pct=stats.get("high_conviction_pct"),
         on_screen_pct=stats.get("on_screen_pct"),
         off_screen_held_pct=stats.get("off_screen_held_pct"),
+        effective_bets=div.get("effective_bets") if isinstance(div, dict) else None,
+        diversification_grade=div_grade.get("grade"),
+        largest_cluster_pct=largest_cluster_pct,
         positions_json=brief.get("portfolio"),
         actions_json=(
             rebalance.get("exits", []) +
@@ -220,9 +284,9 @@ def _save_brief_snapshot(brief: dict[str, Any]) -> None:
 def _get_broker_positions() -> list[dict]:
     """Return current positions from Schwab; fall back to local portfolio."""
     try:
+        from maverick_mcp.api.routers.schwab import _load_schwab
         from maverick_mcp.providers.schwab import SchwabClient
         from maverick_mcp.providers.schwab.sync import fetch_schwab_positions
-        from maverick_mcp.api.routers.schwab import _load_schwab
 
         config, store = _load_schwab()
         client = SchwabClient(config, store)
@@ -260,24 +324,28 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
     def portfolio_rebalance_suggestions(
         total_portfolio_value: float | None = None,
         available_cash: float = 0.0,
+        diversify: bool = True,
     ) -> dict[str, Any]:
         """
-        Conviction-driven rebalance with cash-first deployment.
+        Conviction-driven rebalance with cash-first deployment and the Dalio layer.
 
-        Position targets are computed from vc_loop conviction scores on a
-        continuous curve (not fixed bands), so high-conviction names earn more
-        size automatically. Available cash is deployed into underweight positions
-        before any trimming is suggested — trims are only recommended when adds
-        exceed available liquidity, or for concentration reduction.
+        Targets come from vc_loop conviction on a continuous curve, then are
+        adjusted for portfolio construction (when diversify=True):
+          - Cluster cap: correlated names (e.g. all the space stocks) share a
+            ~20% budget so five correlated 5% bets don't become one 25% bet.
+          - Risk-parity tilt: high-volatility names get slightly smaller targets
+            so each position contributes more equal *risk*, not equal *dollars*.
+        Available cash is deployed into underweight names before any trim.
 
         Args:
             total_portfolio_value: Override total portfolio value (equity only).
-            available_cash: Idle cash available to deploy. Pass from broker
-                account_summary for accurate cash-first logic.
+            available_cash: Idle cash available to deploy (cash-first logic).
+            diversify: Apply correlation cluster caps + risk-parity tilt (default True).
 
         Returns:
-            actions: per-ticker actions with conviction target, delta, and funding source
+            actions: per-ticker actions with conviction + correlation-adjusted target
             cash_summary: how much cash deploys, whether trims are needed for funding
+            diversification: clusters capped, effective bets, grade
         """
         positions = _get_broker_positions()
         if not positions:
@@ -290,16 +358,56 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
         if total_value <= 0:
             return {"error": "Cannot compute weights: total portfolio value is zero."}
 
-        actions = []
-        for pos in positions:
-            ticker = pos["ticker"].upper()
-            mv = pos["market_value"]
-            current_pct = mv / total_value
-            score = conviction_scores.get(ticker)
+        tickers = [p["ticker"].upper() for p in positions]
+        mv_by_ticker = {p["ticker"].upper(): p["market_value"] for p in positions}
 
+        # --- Pass 1: standalone conviction targets ---
+        standalone: dict[str, float] = {}
+        meta: dict[str, dict] = {}
+        for ticker in tickers:
+            score = conviction_scores.get(ticker)
             on_acc = ticker in accumulate
             on_off = ticker in off_screen
-            target_pct = _conviction_to_target_pct(score, on_acc, on_off)
+            standalone[ticker] = _conviction_to_target_pct(score, on_acc, on_off)
+            meta[ticker] = {"score": score, "on_acc": on_acc, "on_off": on_off}
+
+        # --- Diversification adjustment (cluster caps + risk parity) ---
+        final_targets = dict(standalone)
+        diversification: dict[str, Any] = {"applied": False}
+        capped_tickers: set[str] = set()
+        if diversify and len(tickers) >= 2:
+            try:
+                from maverick_mcp.vc_loop import diversification as dv
+
+                corr, vols = _fetch_corr_and_vols(tickers)
+                if corr:
+                    weights = {t: mv_by_ticker[t] / total_value for t in tickers}
+                    clusters = dv.cluster_positions(corr, list(corr.keys()))
+                    capped, caps_log = dv.apply_cluster_caps(standalone, clusters)
+                    final_targets = dv.risk_parity_tilt(capped, vols)
+                    for c in caps_log:
+                        capped_tickers.update(c["members"])
+                    diversification = {
+                        "applied": True,
+                        "effective_bets": round(dv.effective_bets(weights, corr), 1),
+                        "grade": dv.diversification_grade(
+                            dv.effective_bets(weights, corr)
+                        ),
+                        "clusters_capped": caps_log,
+                    }
+            except Exception as exc:
+                logger.warning("Diversification adjustment failed: %s", exc)
+                diversification = {"applied": False, "error": str(exc)}
+
+        # --- Pass 2: build actions from adjusted targets ---
+        actions = []
+        for ticker in tickers:
+            mv = mv_by_ticker[ticker]
+            current_pct = mv / total_value
+            score = meta[ticker]["score"]
+            on_acc = meta[ticker]["on_acc"]
+            on_off = meta[ticker]["on_off"]
+            target_pct = final_targets[ticker]
             delta_pct = target_pct - current_pct
             delta_dollars = delta_pct * total_value
 
@@ -313,28 +421,31 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
             cur_s = f"{current_pct*100:.1f}%"
             tgt_s = f"{target_pct*100:.1f}%"
             score_s = f" · conviction {score:.0f}" if score else " · no vc_loop score"
+            capped_s = " · cluster-capped" if ticker in capped_tickers else ""
             if action == "exit":
                 rationale = f"Off screen — exit fully ({cur_s} → 0%)"
             elif action == "trim":
                 rationale = (
                     f"{'On screen' if on_acc else 'Not in universe'}, {cur_s} → {tgt_s} target"
-                    f"{score_s} — trim ${abs(delta_dollars):.0f} (concentration reduction)"
+                    f"{score_s}{capped_s} — trim ${abs(delta_dollars):.0f}"
                 )
             elif action == "add":
                 rationale = (
                     f"On screen, underweight: {cur_s} → {tgt_s} target"
-                    f"{score_s} — add ${delta_dollars:.0f}"
+                    f"{score_s}{capped_s} — add ${delta_dollars:.0f}"
                 )
             else:
-                rationale = f"At target {tgt_s}{score_s} — hold"
+                rationale = f"At target {tgt_s}{score_s}{capped_s} — hold"
 
             actions.append({
                 "ticker": ticker,
                 "on_screen": on_acc,
                 "on_off_screen": on_off,
                 "conviction_score": score,
+                "cluster_capped": ticker in capped_tickers,
                 "current_value": round(mv, 2),
                 "current_pct": round(current_pct * 100, 2),
+                "standalone_target_pct": round(standalone[ticker] * 100, 2),
                 "target_pct": round(target_pct * 100, 2),
                 "action": action,
                 "delta_dollars": round(delta_dollars, 2),
@@ -401,6 +512,7 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 "trim_needed_for_funding": trim_needed_for_funding,
                 "trims_are_for_concentration_only": trim_needed_for_funding == 0,
             },
+            "diversification": diversification,
             "summary": {
                 "exit_count": len(exits),
                 "trim_count": len(trims),
@@ -411,6 +523,49 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 "top_trims": [a["ticker"] for a in trims[:5]],
             },
         }
+
+    @mcp.tool(name="portfolio_diversification")
+    def portfolio_diversification(cluster_threshold: float = 0.6) -> dict[str, Any]:
+        """
+        The Dalio layer — how diversified is the book, really?
+
+        Conviction sizing ignores correlation. Five space stocks at 5% each are
+        not five bets — they're one ~25% bet. This computes:
+          - effective_bets: how many *independent* bets you have (Dalio target ~15)
+          - clusters: correlated groups that move together (one real bet each)
+          - risk_contribution: each position's share of portfolio RISK, not dollars
+            (a volatile name can be a small position but a huge risk share)
+          - grade: A–F vs the 15-bet target
+
+        Uses 252 days of real price history for the correlation matrix and
+        annualized volatility.
+
+        Args:
+            cluster_threshold: pairwise correlation to group names (default 0.6).
+        """
+        from maverick_mcp.vc_loop import diversification as dv
+
+        positions = _get_broker_positions()
+        if len(positions) < 2:
+            return {"error": "Need at least 2 positions for diversification analysis."}
+
+        total_value = sum(p["market_value"] for p in positions)
+        tickers = [p["ticker"].upper() for p in positions]
+        weights = {
+            p["ticker"].upper(): p["market_value"] / total_value
+            for p in positions
+        }
+
+        corr, vols = _fetch_corr_and_vols(tickers)
+        if not corr:
+            return {"error": "Insufficient price history to build correlation matrix."}
+
+        report = dv.diversification_report(
+            weights, corr, vols, cluster_threshold=cluster_threshold
+        )
+        report["as_of"] = datetime.now(UTC).isoformat()
+        report["annualized_vol"] = {t: round(v, 3) for t, v in vols.items()}
+        return report
 
     @mcp.tool(name="investment_brief")
     def investment_brief() -> dict[str, Any]:
@@ -438,9 +593,9 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
 
         cash_balance: float | None = None
         try:
+            from maverick_mcp.api.routers.schwab import _load_schwab
             from maverick_mcp.providers.schwab import SchwabClient
             from maverick_mcp.providers.schwab.sync import summarize_accounts
-            from maverick_mcp.api.routers.schwab import _load_schwab
             config, store = _load_schwab()
             client = SchwabClient(config, store)
             summaries = summarize_accounts(client.accounts(fields="positions") or [])
@@ -472,9 +627,6 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
             trims = [a for a in all_actions if a["action"] == "trim"]
             adds  = [a for a in all_actions if a["action"] == "add"]
 
-            capital_freed = round(sum(abs(a["delta_dollars"]) for a in exits + trims), 2)
-            capital_needed = round(sum(a["delta_dollars"] for a in adds), 2)
-
             def _action_detail(a: dict) -> dict:
                 return {
                     "ticker": a["ticker"],
@@ -491,8 +643,11 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 "top_trims": [_action_detail(a) for a in trims[:6]],
                 "top_adds": [_action_detail(a) for a in adds[:6]],
             }
+            # Surface the Dalio layer at top level (computed inside rebalance)
+            brief["diversification"] = rebalance.get("diversification", {"applied": False})
         except Exception as e:
             brief["rebalance"] = {"error": str(e)}
+            brief["diversification"] = {"applied": False, "error": str(e)}
             exits, trims, adds = [], [], []
 
         # --- Portfolio intelligence stats ---
@@ -592,6 +747,8 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                     "conviction_score": r.portfolio_conviction_score,
                     "high_conviction_pct": r.high_conviction_pct,
                     "off_screen_held_pct": r.off_screen_held_pct,
+                    "effective_bets": r.effective_bets,
+                    "diversification_grade": r.diversification_grade,
                     "regime": r.regime,
                     "position_count": r.position_count,
                 }
@@ -612,6 +769,7 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
                 "total_value_delta": _delta("total_value"),
                 "deployed_pct_delta": _delta("deployed_pct"),
                 "off_screen_held_delta": _delta("off_screen_held_pct"),
+                "effective_bets_delta": _delta("effective_bets"),
                 "window_days": len(rows),
             }
 
@@ -629,6 +787,12 @@ def register_investment_ops_tools(mcp: FastMCP) -> None:
             os_delta = drift["off_screen_held_delta"]
             if os_delta is not None and os_delta > 2:
                 alerts.append(f"Off-screen held % growing: +{os_delta:.1f}% — exits overdue?")
+            eb = latest.get("effective_bets")
+            if eb is not None and eb < 6:
+                alerts.append(f"Only ~{eb:.0f} effective bets (Dalio target 15) — book is concentrated in correlated names")
+            eb_delta = drift["effective_bets_delta"]
+            if eb_delta is not None and eb_delta < -1:
+                alerts.append(f"Diversification eroding: effective bets {eb_delta:+.1f} over window")
 
             return {
                 "snapshots": snapshots,

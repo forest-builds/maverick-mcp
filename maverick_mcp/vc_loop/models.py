@@ -90,6 +90,12 @@ class BriefSnapshot(Base, TimestampMixin):
     regime: Mapped[str | None] = mapped_column(String(50), nullable=True)
     regime_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Diversification (Dalio layer) — tracked over time to see if the book is
+    # spreading risk or concentrating it.
+    effective_bets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    diversification_grade: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    largest_cluster_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # CIO synthesis text verbatim
     synthesis: Mapped[str | None] = mapped_column(Text, nullable=True)
 
