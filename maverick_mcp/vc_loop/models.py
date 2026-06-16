@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from maverick_mcp.data.models import TimestampMixin
@@ -104,3 +104,35 @@ class BriefSnapshot(Base, TimestampMixin):
     actions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     screen_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     new_opportunities_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+
+class PositionSnapshot(Base, TimestampMixin):
+    """Per-position P&L snapshot captured on each intelligence run.
+
+    One row per held ticker per run. Enables conviction accuracy analysis:
+    compare conviction_at_snapshot on day T to unrealized_pnl_pct on T+N.
+    """
+
+    __tablename__ = "position_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    shares: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    conviction_at_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    position_closed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    __table_args__ = (
+        Index("idx_pos_snap_ticker_at", "ticker", "snapshot_at"),
+    )
