@@ -352,8 +352,12 @@ def review_and_learn() -> dict:
     return result
 
 
+# Traditional (MARGIN) account — hold forever, never action items.
+TRADITIONAL_TICKERS = {"NVDA", "TSLA", "PLTR", "IREN", "OKLO", "COIN"}
+
+
 def send_run_alert(brief: dict) -> None:
-    """Send a Telegram push notification with the run digest."""
+    """Send a Telegram push notification — Roth-focused, traditional for awareness only."""
     import os
 
     import requests
@@ -364,33 +368,95 @@ def send_run_alert(brief: dict) -> None:
         logger.debug("Telegram not configured — skipping alert")
         return
 
+    from sqlalchemy import func
+
+    from maverick_mcp.data.models import SessionLocal
+    from maverick_mcp.vc_loop.models import PositionSnapshot
+
     portfolio = brief.get("portfolio", {})
     stats = brief.get("stats", {})
-    opps = brief.get("new_opportunities", [])
-
-    equity = portfolio.get("equity_value") or 0
-    positions_count = portfolio.get("position_count") or 0
-    conviction = stats.get("portfolio_conviction_score") or 0
-    deployed_pct = stats.get("deployed_pct") or 0
-    regime = brief.get("regime", "")
+    screen = brief.get("screen", {})
 
     run_time = datetime.now().strftime("%I:%M%p").lstrip("0")
 
-    # Top opportunities (not yet held, high conviction)
-    top_opps = sorted(opps, key=lambda x: x.get("conviction", 0), reverse=True)[:3]
-    opp_lines = "\n".join(
-        f"  `{o['ticker']}` {o.get('conviction', 0):.0f} · {o.get('action', 'watch')}"
-        for o in top_opps
-    ) or "  _none_"
+    # Read most recent PositionSnapshot batch for P&L data
+    with SessionLocal() as session:
+        latest_at = (
+            session.query(func.max(PositionSnapshot.snapshot_at))
+            .filter(PositionSnapshot.position_closed == False)  # noqa: E712
+            .scalar()
+        )
+        snap_rows = (
+            session.query(PositionSnapshot)
+            .filter(
+                PositionSnapshot.snapshot_at == latest_at,
+                PositionSnapshot.position_closed == False,  # noqa: E712
+            )
+            .all()
+        ) if latest_at else []
+        snap_data = [
+            {
+                "ticker": r.ticker,
+                "market_value": r.market_value or 0,
+                "unrealized_pnl_pct": r.unrealized_pnl_pct,
+            }
+            for r in snap_rows
+        ]
 
-    regime_str = f" · {regime}" if regime else ""
-    equity_str = f"${equity / 1000:.0f}k" if equity >= 1000 else f"${equity:.0f}"
+    # Split Roth vs traditional
+    roth_snaps = [p for p in snap_data if p["ticker"] not in TRADITIONAL_TICKERS]
+    trad_value = sum(p["market_value"] for p in snap_data if p["ticker"] in TRADITIONAL_TICKERS)
+    roth_equity = sum(p["market_value"] for p in roth_snaps)
+    cash = portfolio.get("cash_balance") or 0
+    roth_total = roth_equity + cash
 
-    text = (
-        f"*Maverick {run_time}* — {equity_str} | Conviction {conviction:.1f}{regime_str}\n\n"
-        f"💼 {equity_str} · {deployed_pct:.0f}% deployed · {positions_count} positions\n\n"
-        f"*Top signals*\n{opp_lines}"
-    )
+    # P&L winners / losers (Roth only)
+    pnl_list = [
+        (p["ticker"], p["unrealized_pnl_pct"])
+        for p in roth_snaps
+        if p["unrealized_pnl_pct"] is not None
+    ]
+    pnl_list.sort(key=lambda x: x[1], reverse=True)
+    winners = [f"{t} +{pct:.0f}%" for t, pct in pnl_list if pct > 0][:4]
+    losers  = [f"{t} {pct:.0f}%"  for t, pct in pnl_list if pct < 0][:4]
+
+    # Actions from screen data (Roth only)
+    off_screen = [
+        t for t in (screen.get("held_off_screen") or [])
+        if t not in TRADITIONAL_TICKERS
+    ]
+    on_screen_tickers = set(screen.get("held_accumulate") or [])
+    roth_tickers = {p["ticker"] for p in roth_snaps}
+    potential_adds = [
+        t for t in on_screen_tickers
+        if t not in roth_tickers and t not in TRADITIONAL_TICKERS
+    ][:4]
+
+    conviction = stats.get("portfolio_conviction_score") or 0
+    roth_str = f"${roth_total / 1000:.1f}k" if roth_total >= 1000 else f"${roth_total:.0f}"
+    trad_str = f"${trad_value / 1000:.0f}k" if trad_value >= 1000 else f"${trad_value:.0f}"
+
+    lines = [f"*Maverick {run_time}* — Roth {roth_str} | Conviction {conviction:.0f}", ""]
+    lines.append(f"📊 {roth_str} · ${cash:,.0f} cash · {len(roth_snaps)} positions")
+    if winners:
+        lines.append(f"🟢 *Winners*   {' · '.join(winners)}")
+    if losers:
+        lines.append(f"🔴 *Laggards*  {' · '.join(losers)}")
+    lines.append("")
+    lines.append("*Today\\'s moves (Roth)*")
+    if off_screen:
+        lines.append(f"❌ Exit   {' · '.join(off_screen)}")
+    if potential_adds:
+        lines.append(f"➕ Add    {' · '.join(potential_adds)}")
+    if not off_screen and not potential_adds:
+        lines.append("_No actions — hold_")
+    lines.append("")
+    lines.append(f"*Traditional (hold forever)*  {trad_str}")
+    lines.append("\nNext run: 12:00pm ET" if "8:" in run_time else
+                 "\nNext run: 4:30pm ET" if "12:" in run_time else
+                 "\nSee you tomorrow 8:00am ET")
+
+    text = "\n".join(lines)
 
     try:
         resp = requests.post(
