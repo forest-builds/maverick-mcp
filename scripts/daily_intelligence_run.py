@@ -353,7 +353,7 @@ def review_and_learn() -> dict:
 
 
 # Traditional (MARGIN) account — hold forever, never action items.
-TRADITIONAL_TICKERS = {"NVDA", "TSLA", "PLTR", "IREN", "OKLO", "COIN"}
+TRADITIONAL_TICKERS = {"NVDA", "PLTR", "IREN", "OKLO", "COIN"}
 
 
 def send_run_alert(brief: dict) -> None:
