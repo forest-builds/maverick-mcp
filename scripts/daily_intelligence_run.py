@@ -224,8 +224,11 @@ async def run_vc_loop_pass() -> int:
     return count
 
 
-def save_snapshot() -> bool:
-    """Pull live positions and save a brief snapshot + per-position P&L rows."""
+def save_snapshot() -> dict:
+    """Pull live positions, save a brief snapshot + per-position P&L rows.
+
+    Returns the brief dict (for use in the Telegram alert) or {} on failure.
+    """
     from maverick_mcp.api.routers.investment_ops import (
         _fetch_corr_and_vols,
         _get_broker_positions,
@@ -243,7 +246,7 @@ def save_snapshot() -> bool:
     positions = _get_broker_positions()
     if not positions:
         logger.warning("No positions found — broker may be offline. Snapshot skipped.")
-        return False
+        return {}
 
     total_value = sum(p["market_value"] for p in positions)
     held_tickers = {p["ticker"].upper() for p in positions}
@@ -301,7 +304,106 @@ def save_snapshot() -> bool:
     _write_position_snapshots(positions, conviction_scores, snapshot_at)
     _close_thesis_outcomes(prev_tickers, held_tickers, snapshot_at)
 
-    return True
+    return brief
+
+
+def review_and_learn() -> dict:
+    """Close due theses, recompute learned weights, and persist them."""
+    from maverick_mcp.data.models import SessionLocal
+    from maverick_mcp.vc_loop.calibration import (
+        brier_score,
+        review_theses,
+        save_learned_weights,
+    )
+    from maverick_mcp.vc_loop.models import ThesisLedger
+
+    with SessionLocal() as session:
+        result = review_theses(session, days_after=7, limit=500, update_weights=True)
+
+    reviewed = result.get("reviewed_count", 0)
+    cal = result.get("calibration", {})
+    lw = cal.get("learned_weights", {})
+
+    if lw.get("status") == "ok":
+        weights = lw["weights"]
+        sample_count = lw.get("sample_count", 0)
+        brier = cal.get("brier_score")
+
+        # Fetch all rows for brier if not already computed
+        if brier is None:
+            with SessionLocal() as session:
+                all_rows = session.query(ThesisLedger).all()
+                brier = brier_score(all_rows)
+
+        save_learned_weights(weights, brier=brier, sample_count=sample_count)
+        logger.info(
+            "review_and_learn: %d theses reviewed, weights updated from %d outcomes (brier=%.4f)",
+            reviewed,
+            sample_count,
+            brier or 0.0,
+        )
+    else:
+        logger.info(
+            "review_and_learn: %d theses reviewed, %s (need ≥5 closed outcomes)",
+            reviewed,
+            lw.get("status", "no update"),
+        )
+
+    return result
+
+
+def send_run_alert(brief: dict) -> None:
+    """Send a Telegram push notification with the run digest."""
+    import os
+
+    import requests
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        logger.debug("Telegram not configured — skipping alert")
+        return
+
+    portfolio = brief.get("portfolio", {})
+    stats = brief.get("stats", {})
+    opps = brief.get("new_opportunities", [])
+
+    equity = portfolio.get("equity_value") or 0
+    positions_count = portfolio.get("position_count") or 0
+    conviction = stats.get("portfolio_conviction_score") or 0
+    deployed_pct = stats.get("deployed_pct") or 0
+    regime = brief.get("regime", "")
+
+    run_time = datetime.now().strftime("%I:%M%p").lstrip("0")
+
+    # Top opportunities (not yet held, high conviction)
+    top_opps = sorted(opps, key=lambda x: x.get("conviction", 0), reverse=True)[:3]
+    opp_lines = "\n".join(
+        f"  `{o['ticker']}` {o.get('conviction', 0):.0f} · {o.get('action', 'watch')}"
+        for o in top_opps
+    ) or "  _none_"
+
+    regime_str = f" · {regime}" if regime else ""
+    equity_str = f"${equity / 1000:.0f}k" if equity >= 1000 else f"${equity:.0f}"
+
+    text = (
+        f"*Maverick {run_time}* — {equity_str} | Conviction {conviction:.1f}{regime_str}\n\n"
+        f"💼 {equity_str} · {deployed_pct:.0f}% deployed · {positions_count} positions\n\n"
+        f"*Top signals*\n{opp_lines}"
+    )
+
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        if resp.ok:
+            logger.info("Alert sent via Telegram")
+        else:
+            logger.warning("Telegram alert failed: %s %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("Telegram alert error: %s", exc)
 
 
 async def main() -> None:
@@ -319,11 +421,24 @@ async def main() -> None:
     except Exception as exc:
         logger.error("vc_loop failed: %s", exc, exc_info=True)
 
-    # 3. Save portfolio snapshot + position P&L rows
+    # 3. Save portfolio snapshot + position P&L rows; capture brief for alert
+    brief: dict = {}
     try:
-        save_snapshot()
+        brief = save_snapshot() or {}
     except Exception as exc:
         logger.error("Snapshot failed: %s", exc, exc_info=True)
+
+    # 4. Close due theses (≥7 days old) and persist updated conviction weights
+    try:
+        review_and_learn()
+    except Exception as exc:
+        logger.error("review_and_learn failed: %s", exc, exc_info=True)
+
+    # 5. Push Telegram digest
+    try:
+        send_run_alert(brief)
+    except Exception as exc:
+        logger.error("Alert failed: %s", exc, exc_info=True)
 
     logger.info("=== Done ===")
 

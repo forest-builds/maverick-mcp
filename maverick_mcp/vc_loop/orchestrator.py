@@ -14,6 +14,7 @@ import logging
 from datetime import UTC, datetime
 
 from maverick_mcp.vc_loop import obsidian, scorer
+from maverick_mcp.vc_loop.calibration import load_learned_weights
 from maverick_mcp.vc_loop.candidates import (
     Candidate,
     gather_candidates,
@@ -88,6 +89,9 @@ async def run_vc_loop(
     Returns:
         A dict with the ranked proposals, ledger rows, and the pipeline note path.
     """
+    # Load persisted learned weights so scores improve permanently over time.
+    load_learned_weights()
+
     # Step 1: screener candidates (niche growth universe, ADR-filtered)
     screen_candidates = await gather_candidates(
         strategy=strategy,

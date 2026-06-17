@@ -136,3 +136,25 @@ class PositionSnapshot(Base, TimestampMixin):
     __table_args__ = (
         Index("idx_pos_snap_ticker_at", "ticker", "snapshot_at"),
     )
+
+
+class LearnedWeights(Base, TimestampMixin):
+    """Persisted conviction-scoring weights learned from closed thesis outcomes.
+
+    One row per calibration run. The latest row is always active — loaded at
+    the start of each vc_loop pass so the scorer improves permanently over time.
+    """
+
+    __tablename__ = "learned_weights"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
+    weights_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    brier_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    blend_factor: Mapped[float] = mapped_column(Float, nullable=False, default=0.35)

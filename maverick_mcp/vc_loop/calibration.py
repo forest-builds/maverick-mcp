@@ -17,8 +17,8 @@ from typing import Any
 from sqlalchemy import asc
 from sqlalchemy.orm import Session
 
-from maverick_mcp.data.models import PriceCache, Stock
-from maverick_mcp.vc_loop.models import ThesisLedger
+from maverick_mcp.data.models import PriceCache, SessionLocal, Stock
+from maverick_mcp.vc_loop.models import LearnedWeights, ThesisLedger
 from maverick_mcp.vc_loop.scorer import WEIGHTS
 
 
@@ -240,6 +240,45 @@ def apply_learned_weights(learning_result: dict[str, Any]) -> dict[str, Any]:
     WEIGHTS.clear()
     WEIGHTS.update({str(key): float(value) for key, value in weights.items()})
     return {"status": "updated", "weights": dict(WEIGHTS)}
+
+
+def save_learned_weights(
+    weights: dict[str, float],
+    *,
+    brier: float | None = None,
+    sample_count: int = 0,
+    blend_factor: float = 0.35,
+) -> None:
+    """Persist a set of learned weights to the DB."""
+    with SessionLocal() as session:
+        session.add(
+            LearnedWeights(
+                weights_json=weights,
+                brier_score=brier,
+                sample_count=sample_count,
+                blend_factor=blend_factor,
+            )
+        )
+        session.commit()
+
+
+def load_learned_weights() -> dict[str, float] | None:
+    """Load the most recent persisted weights and apply them to the scorer.
+
+    Returns the weights dict if found and applied, None if no rows exist yet.
+    """
+    with SessionLocal() as session:
+        row = (
+            session.query(LearnedWeights)
+            .order_by(LearnedWeights.computed_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        weights = {str(k): float(v) for k, v in row.weights_json.items()}
+
+    apply_learned_weights({"status": "ok", "weights": weights})
+    return weights
 
 
 def review_theses(
