@@ -34,6 +34,8 @@ SCHWAB_CLIENT_ID="${SCHWAB_CLIENT_ID:-}"
 SCHWAB_CLIENT_SECRET="${SCHWAB_CLIENT_SECRET:-}"
 SCHWAB_REDIRECT_URI="${SCHWAB_REDIRECT_URI:-https://127.0.0.1:8765/callback}"
 SCHWAB_TOKEN_FILE="${SCHWAB_TOKEN_FILE:-$HOME/.local/schwab-token.json}"
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 
 if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$SCHWAB_CLIENT_SECRET" ]; then
   echo "WARNING: SCHWAB_CLIENT_ID or SCHWAB_CLIENT_SECRET not set."
@@ -103,6 +105,10 @@ cat > "$PLIST_PATH" <<EOF
     <string>$SCHWAB_REDIRECT_URI</string>
     <key>SCHWAB_TOKEN_FILE</key>
     <string>$SCHWAB_TOKEN_FILE</string>
+    <key>TELEGRAM_BOT_TOKEN</key>
+    <string>$TELEGRAM_BOT_TOKEN</string>
+    <key>TELEGRAM_CHAT_ID</key>
+    <string>$TELEGRAM_CHAT_ID</string>
   </dict>
 </dict>
 </plist>
