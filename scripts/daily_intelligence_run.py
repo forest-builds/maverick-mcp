@@ -356,20 +356,31 @@ def review_and_learn() -> dict:
 TRADITIONAL_TICKERS = {"NVDA", "PLTR", "IREN", "OKLO", "COIN"}
 
 
-def _slot_meta(hour: int) -> tuple[str, str, str]:
-    """Return (emoji, label, next_run_str) for the current hour."""
-    if hour == 8:
-        return "🌅", "Pre-Market", "9:45am"
-    elif hour == 9:
-        return "🔔", "Open", "12:30pm"
-    elif hour == 12:
-        return "☀️", "Midday", "2:30pm"
-    elif hour == 14:
-        return "⚡", "Late Session", "4:15pm"
-    elif hour == 16:
-        return "🌙", "Close", "8:00am tomorrow"
+def _slot_meta(now: datetime) -> tuple[str, str, str, str]:
+    """Return (emoji, label, next_run_str, context) by nearest scheduled slot."""
+    schedule = [(8, 0), (9, 45), (12, 30), (14, 30), (16, 15)]
+    labels   = ["🌅 Pre-Market", "🔔 Open", "☀️ Midday", "⚡ Late Session", "🌙 Close"]
+    contexts = [
+        "Pre-market — today\\'s full picture",
+        "Open settled — first conviction read",
+        "Midday — session check-in",
+        "Power hour — late session positioning",
+        "Market closed — day recap",
+    ]
+    total = now.hour * 60 + now.minute
+    slot_mins = [h * 60 + m for h, m in schedule]
+    idx = min(range(len(slot_mins)), key=lambda i: abs(slot_mins[i] - total))
+    emoji_label = labels[idx]
+    emoji, label = emoji_label.split(" ", 1)
+    next_idx = idx + 1
+    if next_idx < len(schedule):
+        nh, nm = schedule[next_idx]
+        suffix = "am" if nh < 12 else "pm"
+        disp_h = nh if nh <= 12 else nh - 12
+        next_str = f"{disp_h}:{nm:02d}{suffix}"
     else:
-        return "📊", "Update", "next run"
+        next_str = "8:00am tomorrow"
+    return emoji, label, next_str, contexts[idx]
 
 
 def send_run_alert(brief: dict) -> None:
@@ -394,9 +405,8 @@ def send_run_alert(brief: dict) -> None:
     screen = brief.get("screen", {})
 
     now = datetime.now()
-    hour = now.hour
     run_time = now.strftime("%I:%M%p").lstrip("0")
-    slot_emoji, slot_label, next_run = _slot_meta(hour)
+    slot_emoji, slot_label, next_run, slot_ctx = _slot_meta(now)
 
     # ── Position snapshots ──────────────────────────────────────────────────
     with SessionLocal() as session:
@@ -474,14 +484,7 @@ def send_run_alert(brief: dict) -> None:
         val = fmt_k(r.market_value or 0)
         holding_lines.append(f"  {r.ticker:<6} cv{cv:<3}  {pnl:<6}  {val}")
 
-    # ── Slot-specific header context ───────────────────────────────────────
-    slot_context = {
-        8:  "Pre-market — today\\'s full picture",
-        9:  "Open settled — first conviction read",
-        12: "Midday — session check-in",
-        14: "Power hour — late session positioning",
-        16: "Market closed — day recap",
-    }.get(hour, "Portfolio update")
+    slot_context = slot_ctx
 
     # ── Build message ──────────────────────────────────────────────────────
     lines: list[str] = []
