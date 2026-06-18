@@ -425,8 +425,8 @@ def send_run_alert(brief: dict) -> None:
                 .order_by(desc(ThesisLedger.thesis_date))
                 .first()
             )
-            if thesis and thesis.conviction_score is not None:
-                conviction_by_ticker[t] = thesis.conviction_score
+            if thesis and thesis.conviction is not None:
+                conviction_by_ticker[t] = thesis.conviction
 
     # ── Split Roth / traditional ────────────────────────────────────────────
     roth_rows = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
