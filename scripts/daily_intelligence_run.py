@@ -395,12 +395,11 @@ def send_run_alert(brief: dict) -> None:
         logger.debug("Telegram not configured — skipping alert")
         return
 
-    from sqlalchemy import func
+    from sqlalchemy import desc, func
 
     from maverick_mcp.data.models import SessionLocal
     from maverick_mcp.vc_loop.models import PositionSnapshot, ThesisLedger
 
-    portfolio = brief.get("portfolio", {})
     stats = brief.get("stats", {})
     screen = brief.get("screen", {})
 
@@ -408,59 +407,111 @@ def send_run_alert(brief: dict) -> None:
     run_time = now.strftime("%I:%M%p").lstrip("0")
     slot_emoji, slot_label, next_run, slot_ctx = _slot_meta(now)
 
-    # ── Position snapshots ──────────────────────────────────────────────────
+    # ── Snapshots: latest + previous (for intraday delta) ──────────────────
     with SessionLocal() as session:
-        latest_at = (
-            session.query(func.max(PositionSnapshot.snapshot_at))
+        # Two most recent distinct snapshot times
+        recent_times = (
+            session.query(PositionSnapshot.snapshot_at)
             .filter(PositionSnapshot.position_closed == False)  # noqa: E712
-            .scalar()
-        )
-        snap_rows = (
-            session.query(PositionSnapshot)
-            .filter(
-                PositionSnapshot.snapshot_at == latest_at,
-                PositionSnapshot.position_closed == False,  # noqa: E712
-            )
+            .distinct()
+            .order_by(desc(PositionSnapshot.snapshot_at))
+            .limit(2)
             .all()
-        ) if latest_at else []
+        )
+        times = [r[0] for r in recent_times]
+        latest_at = times[0] if times else None
+        prev_at = times[1] if len(times) > 1 else None
+
+        def _load_snaps(at):
+            if not at:
+                return []
+            return (
+                session.query(PositionSnapshot)
+                .filter(
+                    PositionSnapshot.snapshot_at == at,
+                    PositionSnapshot.position_closed == False,  # noqa: E712
+                )
+                .all()
+            )
+
+        snap_rows = _load_snaps(latest_at)
+        prev_rows = _load_snaps(prev_at)
+        prev_value_by_ticker = {r.ticker: r.market_value or 0 for r in prev_rows}
 
         # Latest conviction per ticker from ThesisLedger
-        from sqlalchemy import desc
         conviction_by_ticker: dict[str, float] = {}
         for row in snap_rows:
-            t = row.ticker
             thesis = (
                 session.query(ThesisLedger)
-                .filter(ThesisLedger.ticker == t)
+                .filter(ThesisLedger.ticker == row.ticker)
                 .order_by(desc(ThesisLedger.thesis_date))
                 .first()
             )
             if thesis and thesis.conviction is not None:
-                conviction_by_ticker[t] = thesis.conviction
+                conviction_by_ticker[row.ticker] = thesis.conviction
+
+    # ── Cash from Schwab account summary ───────────────────────────────────
+    cash = 0.0
+    try:
+        from maverick_mcp.api.routers.schwab import _load_schwab
+        from maverick_mcp.providers.schwab.client import SchwabClient
+        from maverick_mcp.providers.schwab.sync import summarize_accounts
+
+        cfg, store = _load_schwab()
+        client = SchwabClient(cfg, store)
+        summaries = summarize_accounts(client.accounts())
+        for s in summaries:
+            if s.account_type == "CASH":
+                cash = float(s.cash_balance or 0)
+    except Exception:
+        pass
 
     # ── Split Roth / traditional ────────────────────────────────────────────
     roth_rows = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
     trad_rows = [r for r in snap_rows if r.ticker in TRADITIONAL_TICKERS]
     trad_value = sum(r.market_value or 0 for r in trad_rows)
     roth_equity = sum(r.market_value or 0 for r in roth_rows)
-    cash = portfolio.get("cash_balance") or 0
     roth_total = roth_equity + cash
     conv_score = stats.get("portfolio_conviction_score") or 0
 
-    # Sort Roth holdings by conviction desc, then value desc
+    # Sort Roth by conviction desc, then value desc
     roth_rows_sorted = sorted(
         roth_rows,
         key=lambda r: (conviction_by_ticker.get(r.ticker, 0), r.market_value or 0),
         reverse=True,
     )
 
-    # ── Actions (Roth only) ────────────────────────────────────────────────
-    off_screen = [t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS]
+    # ── Intraday delta per ticker ───────────────────────────────────────────
+    def intraday_delta(ticker: str, cur_val: float) -> str:
+        prev = prev_value_by_ticker.get(ticker)
+        if not prev or prev == 0:
+            return ""
+        pct = (cur_val - prev) / prev * 100
+        if abs(pct) < 0.5:
+            return ""
+        sign = "▲" if pct > 0 else "▼"
+        return f" {sign}{abs(pct):.1f}%"
+
+    # ── Smart signals ───────────────────────────────────────────────────────
     roth_tickers = {r.ticker for r in roth_rows}
+    off_screen = [t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS]
+    low_conv_exits = [
+        r.ticker for r in roth_rows
+        if conviction_by_ticker.get(r.ticker, 50) < 40 and r.ticker not in off_screen
+    ]
     potential_adds = [
         t for t in (screen.get("held_accumulate") or [])
         if t not in roth_tickers and t not in TRADITIONAL_TICKERS
-    ][:5]
+    ][:4]
+    # Big movers since last run (>3% either way)
+    big_movers = []
+    for r in roth_rows:
+        prev = prev_value_by_ticker.get(r.ticker)
+        if prev and prev > 0:
+            pct = (( r.market_value or 0) - prev) / prev * 100
+            if abs(pct) >= 3.0:
+                sign = "▲" if pct > 0 else "▼"
+                big_movers.append(f"{r.ticker} {sign}{abs(pct):.1f}%")
 
     # ── Helpers ────────────────────────────────────────────────────────────
     def fmt_k(val: float) -> str:
@@ -468,45 +519,61 @@ def send_run_alert(brief: dict) -> None:
 
     def fmt_pnl(pct: float | None) -> str:
         if pct is None:
-            return "   —  "
+            return "  — "
         sign = "+" if pct >= 0 else ""
         return f"{sign}{pct:.0f}%"
 
     def fmt_conv(ticker: str) -> str:
         c = conviction_by_ticker.get(ticker)
-        return f"{c:.0f}" if c is not None else " —"
+        return f"{c:.0f}" if c is not None else "—"
 
-    # ── Holdings block (all Roth positions) ────────────────────────────────
+    # ── Holdings block ─────────────────────────────────────────────────────
     holding_lines = []
     for r in roth_rows_sorted:
         cv = fmt_conv(r.ticker)
         pnl = fmt_pnl(r.unrealized_pnl_pct)
         val = fmt_k(r.market_value or 0)
-        holding_lines.append(f"  {r.ticker:<6} cv{cv:<3}  {pnl:<6}  {val}")
+        delta = intraday_delta(r.ticker, r.market_value or 0)
+        flag = " ⚠️" if conviction_by_ticker.get(r.ticker, 50) < 40 else ""
+        holding_lines.append(f"  {r.ticker:<6} cv{cv:<3}  {pnl:<5}  {val}{delta}{flag}")
 
-    slot_context = slot_ctx
+    deployed_pct = int(100 * roth_equity / roth_total) if roth_total else 100
 
     # ── Build message ──────────────────────────────────────────────────────
     lines: list[str] = []
     lines.append(f"{slot_emoji} *Maverick {run_time} — {slot_label}*")
-    lines.append(f"_{slot_context}_")
+    lines.append(f"_{slot_ctx}_")
     lines.append("")
-    lines.append(f"💰 Roth {fmt_k(roth_total)}  ·  {fmt_k(cash)} cash  ·  {len(roth_rows)} pos")
-    lines.append(f"📈 Conviction {conv_score:.0f}  ·  deployed {100*(roth_equity/roth_total):.0f}%" if roth_total else f"📈 Conviction {conv_score:.0f}")
+    lines.append(
+        f"💰 Roth {fmt_k(roth_total)}  ·  {fmt_k(cash)} cash  ·  "
+        f"{len(roth_rows)} pos  ·  {deployed_pct}% deployed"
+    )
+    lines.append(f"📈 Portfolio conviction {conv_score:.0f}")
     lines.append("")
-    lines.append("*📋 Holdings (Roth — ranked by conviction)*")
+    lines.append("*📋 Holdings — ranked by conviction*")
     lines.extend(holding_lines)
     lines.append("")
     lines.append("*🎯 Signals*")
-    if potential_adds:
-        lines.append(f"  ➕ Add    {' · '.join(potential_adds)}")
+    has_signal = False
+    if cash >= 200 and potential_adds:
+        lines.append(f"  ➕ Deploy {fmt_k(cash)} → {' · '.join(potential_adds)}")
+        has_signal = True
     if off_screen:
-        lines.append(f"  ❌ Exit   {' · '.join(off_screen)}")
-    if not potential_adds and not off_screen:
-        lines.append("  _Hold — no changes_")
+        lines.append(f"  ❌ Exit   {' · '.join(off_screen)}  _(off screen)_")
+        has_signal = True
+    if low_conv_exits:
+        lines.append(f"  ⚠️ Review  {' · '.join(low_conv_exits)}  _(cv<40)_")
+        has_signal = True
+    if big_movers:
+        lines.append(f"  📊 Movers  {' · '.join(big_movers[:5])}")
+        has_signal = True
+    if not has_signal:
+        lines.append("  _No action needed_")
     lines.append("")
-    lines.append(f"🏛 Traditional {fmt_k(trad_value)}  ·  NVDA · PLTR · IREN · OKLO · COIN  _(hold forever)_")
-    lines.append("")
+    lines.append(
+        f"🏛 Traditional {fmt_k(trad_value)}  ·  "
+        f"NVDA · PLTR · IREN · OKLO · COIN  _(hold forever)_"
+    )
     lines.append(f"⏭ Next: {next_run} ET")
 
     text = "\n".join(lines)
