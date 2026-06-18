@@ -383,6 +383,187 @@ def _slot_meta(now: datetime) -> tuple[str, str, str, str]:
     return emoji, label, next_str, contexts[idx]
 
 
+def _position_blurb(ticker: str, conviction_by_ticker: dict) -> str:
+    """Pull stored thesis text + key features for a one-liner position rationale."""
+    from sqlalchemy import desc
+
+    from maverick_mcp.data.models import SessionLocal
+    from maverick_mcp.vc_loop.models import ThesisLedger
+
+    with SessionLocal() as session:
+        thesis = (
+            session.query(ThesisLedger)
+            .filter(ThesisLedger.ticker == ticker)
+            .order_by(desc(ThesisLedger.thesis_date))
+            .first()
+        )
+    if not thesis:
+        return "No thesis on record."
+    text = (thesis.thesis or "").strip()
+    # Truncate to first 2 sentences max, 120 chars
+    sentences = text.replace("  ", " ").split(". ")
+    blurb = ". ".join(sentences[:2])
+    if len(blurb) > 120:
+        blurb = blurb[:117] + "..."
+    feats = thesis.features or {}
+    momentum = feats.get("momentum")
+    sentiment = feats.get("sentiment_confidence")
+    tags = []
+    if momentum is not None:
+        tags.append(f"mom {momentum:.2f}")
+    if sentiment is not None:
+        tags.append(f"sent {sentiment:.2f}")
+    suffix = f"  _({', '.join(tags)})_" if tags else ""
+    return blurb + suffix
+
+
+def _send_morning_brief(
+    *,
+    token: str,
+    chat_id: str,
+    tg,
+    roth_rows_sorted,
+    conviction_by_ticker: dict,
+    cash: float,
+    potential_adds: list,
+    off_screen: list,
+    low_conv_exits: list,
+    fmt_k,
+    fmt_pnl,
+) -> None:
+    """Second message at 8am: per-position rationale + day plan."""
+    from datetime import date
+
+    today = date.today().strftime("%b %d")
+    lines = [f"📖 *Morning Brief — {today}*", ""]
+
+    # High conviction (cv >= 50) — these are your core holds
+    high = [r for r in roth_rows_sorted if conviction_by_ticker.get(r.ticker, 0) >= 50]
+    watch = [r for r in roth_rows_sorted if 40 <= conviction_by_ticker.get(r.ticker, 0) < 50]
+    review = [r for r in roth_rows_sorted if conviction_by_ticker.get(r.ticker, 0) < 40]
+
+    if high:
+        lines.append("*💎 Core holds (cv ≥50)*")
+        for r in high:
+            cv = conviction_by_ticker.get(r.ticker, 0)
+            pnl = fmt_pnl(r.unrealized_pnl_pct)
+            blurb = _position_blurb(r.ticker, conviction_by_ticker)
+            lines.append(f"*{r.ticker}* cv{cv:.0f}  {pnl}  {fmt_k(r.market_value or 0)}")
+            lines.append(f"  ↳ {blurb}")
+            lines.append("")
+
+    if watch:
+        lines.append("*👀 Watch (cv 40–49)*")
+        for r in watch:
+            cv = conviction_by_ticker.get(r.ticker, 0)
+            pnl = fmt_pnl(r.unrealized_pnl_pct)
+            blurb = _position_blurb(r.ticker, conviction_by_ticker)
+            lines.append(f"*{r.ticker}* cv{cv:.0f}  {pnl}  {fmt_k(r.market_value or 0)}")
+            lines.append(f"  ↳ {blurb}")
+            lines.append("")
+
+    if review:
+        lines.append("*⚠️ Review (cv <40 — exit candidates)*")
+        for r in review:
+            cv = conviction_by_ticker.get(r.ticker, 0)
+            pnl = fmt_pnl(r.unrealized_pnl_pct)
+            lines.append(f"*{r.ticker}* cv{cv:.0f}  {pnl}  {fmt_k(r.market_value or 0)}")
+            lines.append("")
+
+    lines.append("*🗓 Today\\'s plan*")
+    if cash >= 200 and potential_adds:
+        lines.append(f"  ➕ {fmt_k(cash)} to deploy → {' · '.join(potential_adds)}")
+    if off_screen:
+        lines.append(f"  ❌ Exit candidates (off screen): {' · '.join(off_screen)}")
+    if low_conv_exits:
+        lines.append(f"  ⚠️ Low conviction: {' · '.join(low_conv_exits)}")
+    if not cash >= 200 and not off_screen and not low_conv_exits:
+        lines.append("  Hold — portfolio looks aligned")
+
+    # Split into ≤4096-char chunks and send sequentially
+    text = "\n".join(lines)
+    chunk_size = 4000
+    for i in range(0, len(text), chunk_size):
+        tg(text[i:i + chunk_size])
+
+
+def _send_eod_brief(
+    *,
+    token: str,
+    chat_id: str,
+    tg,
+    roth_rows_sorted,
+    conviction_by_ticker: dict,
+    prev_value_by_ticker: dict,
+    roth_equity: float,
+    cash: float,
+    potential_adds: list,
+    low_conv_exits: list,
+    off_screen: list,
+    fmt_k,
+    fmt_pnl,
+) -> None:
+    """Second message at 4:15pm: day recap + tomorrow setup."""
+    from datetime import date
+
+    today = date.today().strftime("%b %d")
+    lines = [f"📊 *EOD Brief — {today}*", ""]
+
+    # Day movers — compare to first snapshot of the day
+    movers_up = []
+    movers_dn = []
+    for r in roth_rows_sorted:
+        prev = prev_value_by_ticker.get(r.ticker)
+        cur = r.market_value or 0
+        if prev and prev > 0 and cur > 0:
+            pct = (cur - prev) / prev * 100
+            if pct >= 2.0:
+                movers_up.append((r.ticker, pct, r.unrealized_pnl_pct))
+            elif pct <= -2.0:
+                movers_dn.append((r.ticker, pct, r.unrealized_pnl_pct))
+
+    movers_up.sort(key=lambda x: x[1], reverse=True)
+    movers_dn.sort(key=lambda x: x[1])
+
+    if movers_up or movers_dn:
+        lines.append("*📈 Today\\'s movers*")
+        for t, day_pct, total_pct in movers_up[:5]:
+            total = f" ({fmt_pnl(total_pct)} total)" if total_pct is not None else ""
+            lines.append(f"  ▲ *{t}* +{day_pct:.1f}% today{total}")
+        for t, day_pct, total_pct in movers_dn[:5]:
+            total = f" ({fmt_pnl(total_pct)} total)" if total_pct is not None else ""
+            lines.append(f"  ▼ *{t}* {day_pct:.1f}% today{total}")
+        lines.append("")
+
+    # Tomorrow setup
+    lines.append("*🔭 Going into tomorrow*")
+    if cash >= 200 and potential_adds:
+        lines.append(f"  💰 {fmt_k(cash)} cash ready → top adds: {' · '.join(potential_adds)}")
+    if off_screen:
+        lines.append(f"  ❌ Still off screen: {' · '.join(off_screen)} — consider exiting")
+    if low_conv_exits:
+        lines.append(f"  ⚠️ Low conviction carries: {' · '.join(low_conv_exits)}")
+
+    # Positions worth watching overnight (catalysts / earnings)
+    catalyst_tickers = [
+        r.ticker for r in roth_rows_sorted
+        if conviction_by_ticker.get(r.ticker, 0) >= 50
+    ][:5]
+    if catalyst_tickers:
+        lines.append(f"  👀 Watch overnight: {' · '.join(catalyst_tickers)}")
+
+    if not off_screen and not low_conv_exits and not (cash >= 200 and potential_adds):
+        lines.append("  Portfolio aligned — no urgent changes")
+
+    lines.append("")
+    lines.append("_See you at 8am 🌅_")
+
+    text = "\n".join(lines)
+    chunk_size = 4000
+    for i in range(0, len(text), chunk_size):
+        tg(text[i:i + chunk_size])
+
+
 def send_run_alert(brief: dict) -> None:
     """Send a Telegram push — 5 customized formats, one per daily slot."""
     import os
@@ -578,18 +759,54 @@ def send_run_alert(brief: dict) -> None:
 
     text = "\n".join(lines)
 
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=10,
+    def _tg(msg: str) -> None:
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.warning("Telegram send failed: %s %s", resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.warning("Telegram error: %s", exc)
+
+    _tg(text)
+    logger.info("Alert sent via Telegram")
+
+    # ── Morning brief (8am only) ───────────────────────────────────────────
+    if slot_label == "Pre-Market":
+        _send_morning_brief(
+            token=token,
+            chat_id=chat_id,
+            tg=_tg,
+            roth_rows_sorted=roth_rows_sorted,
+            conviction_by_ticker=conviction_by_ticker,
+            cash=cash,
+            potential_adds=potential_adds,
+            off_screen=off_screen,
+            low_conv_exits=low_conv_exits,
+            fmt_k=fmt_k,
+            fmt_pnl=fmt_pnl,
         )
-        if resp.ok:
-            logger.info("Alert sent via Telegram")
-        else:
-            logger.warning("Telegram alert failed: %s %s", resp.status_code, resp.text[:200])
-    except Exception as exc:
-        logger.warning("Telegram alert error: %s", exc)
+
+    # ── EOD brief (4:15pm only) ────────────────────────────────────────────
+    if slot_label == "Close":
+        _send_eod_brief(
+            token=token,
+            chat_id=chat_id,
+            tg=_tg,
+            roth_rows_sorted=roth_rows_sorted,
+            conviction_by_ticker=conviction_by_ticker,
+            prev_value_by_ticker=prev_value_by_ticker,
+            roth_equity=roth_equity,
+            cash=cash,
+            potential_adds=potential_adds,
+            low_conv_exits=low_conv_exits,
+            off_screen=off_screen,
+            fmt_k=fmt_k,
+            fmt_pnl=fmt_pnl,
+        )
 
 
 async def main() -> None:
