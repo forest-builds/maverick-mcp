@@ -356,8 +356,24 @@ def review_and_learn() -> dict:
 TRADITIONAL_TICKERS = {"NVDA", "PLTR", "IREN", "OKLO", "COIN"}
 
 
+def _slot_meta(hour: int) -> tuple[str, str, str]:
+    """Return (emoji, label, next_run_str) for the current hour."""
+    if hour == 8:
+        return "🌅", "Pre-Market", "9:45am"
+    elif hour == 9:
+        return "🔔", "Open", "12:30pm"
+    elif hour == 12:
+        return "☀️", "Midday", "2:30pm"
+    elif hour == 14:
+        return "⚡", "Late Session", "4:15pm"
+    elif hour == 16:
+        return "🌙", "Close", "8:00am tomorrow"
+    else:
+        return "📊", "Update", "next run"
+
+
 def send_run_alert(brief: dict) -> None:
-    """Send a Telegram push notification — Roth-focused, traditional for awareness only."""
+    """Send a Telegram push — 5 customized formats, one per daily slot."""
     import os
 
     import requests
@@ -371,15 +387,18 @@ def send_run_alert(brief: dict) -> None:
     from sqlalchemy import func
 
     from maverick_mcp.data.models import SessionLocal
-    from maverick_mcp.vc_loop.models import PositionSnapshot
+    from maverick_mcp.vc_loop.models import PositionSnapshot, ThesisLedger
 
     portfolio = brief.get("portfolio", {})
     stats = brief.get("stats", {})
     screen = brief.get("screen", {})
 
-    run_time = datetime.now().strftime("%I:%M%p").lstrip("0")
+    now = datetime.now()
+    hour = now.hour
+    run_time = now.strftime("%I:%M%p").lstrip("0")
+    slot_emoji, slot_label, next_run = _slot_meta(hour)
 
-    # Read most recent PositionSnapshot batch for P&L data
+    # ── Position snapshots ──────────────────────────────────────────────────
     with SessionLocal() as session:
         latest_at = (
             session.query(func.max(PositionSnapshot.snapshot_at))
@@ -394,67 +413,98 @@ def send_run_alert(brief: dict) -> None:
             )
             .all()
         ) if latest_at else []
-        snap_data = [
-            {
-                "ticker": r.ticker,
-                "market_value": r.market_value or 0,
-                "unrealized_pnl_pct": r.unrealized_pnl_pct,
-            }
-            for r in snap_rows
-        ]
 
-    # Split Roth vs traditional
-    roth_snaps = [p for p in snap_data if p["ticker"] not in TRADITIONAL_TICKERS]
-    trad_value = sum(p["market_value"] for p in snap_data if p["ticker"] in TRADITIONAL_TICKERS)
-    roth_equity = sum(p["market_value"] for p in roth_snaps)
+        # Latest conviction per ticker from ThesisLedger
+        from sqlalchemy import desc
+        conviction_by_ticker: dict[str, float] = {}
+        for row in snap_rows:
+            t = row.ticker
+            thesis = (
+                session.query(ThesisLedger)
+                .filter(ThesisLedger.ticker == t)
+                .order_by(desc(ThesisLedger.thesis_date))
+                .first()
+            )
+            if thesis and thesis.conviction_score is not None:
+                conviction_by_ticker[t] = thesis.conviction_score
+
+    # ── Split Roth / traditional ────────────────────────────────────────────
+    roth_rows = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
+    trad_rows = [r for r in snap_rows if r.ticker in TRADITIONAL_TICKERS]
+    trad_value = sum(r.market_value or 0 for r in trad_rows)
+    roth_equity = sum(r.market_value or 0 for r in roth_rows)
     cash = portfolio.get("cash_balance") or 0
     roth_total = roth_equity + cash
+    conv_score = stats.get("portfolio_conviction_score") or 0
 
-    # P&L winners / losers (Roth only)
-    pnl_list = [
-        (p["ticker"], p["unrealized_pnl_pct"])
-        for p in roth_snaps
-        if p["unrealized_pnl_pct"] is not None
-    ]
-    pnl_list.sort(key=lambda x: x[1], reverse=True)
-    winners = [f"{t} +{pct:.0f}%" for t, pct in pnl_list if pct > 0][:4]
-    losers  = [f"{t} {pct:.0f}%"  for t, pct in pnl_list if pct < 0][:4]
+    # Sort Roth holdings by conviction desc, then value desc
+    roth_rows_sorted = sorted(
+        roth_rows,
+        key=lambda r: (conviction_by_ticker.get(r.ticker, 0), r.market_value or 0),
+        reverse=True,
+    )
 
-    # Actions from screen data (Roth only)
-    off_screen = [
-        t for t in (screen.get("held_off_screen") or [])
-        if t not in TRADITIONAL_TICKERS
-    ]
-    on_screen_tickers = set(screen.get("held_accumulate") or [])
-    roth_tickers = {p["ticker"] for p in roth_snaps}
+    # ── Actions (Roth only) ────────────────────────────────────────────────
+    off_screen = [t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS]
+    roth_tickers = {r.ticker for r in roth_rows}
     potential_adds = [
-        t for t in on_screen_tickers
+        t for t in (screen.get("held_accumulate") or [])
         if t not in roth_tickers and t not in TRADITIONAL_TICKERS
-    ][:4]
+    ][:5]
 
-    conviction = stats.get("portfolio_conviction_score") or 0
-    roth_str = f"${roth_total / 1000:.1f}k" if roth_total >= 1000 else f"${roth_total:.0f}"
-    trad_str = f"${trad_value / 1000:.0f}k" if trad_value >= 1000 else f"${trad_value:.0f}"
+    # ── Helpers ────────────────────────────────────────────────────────────
+    def fmt_k(val: float) -> str:
+        return f"${val / 1000:.1f}k" if val >= 1000 else f"${val:.0f}"
 
-    lines = [f"*Maverick {run_time}* — Roth {roth_str} | Conviction {conviction:.0f}", ""]
-    lines.append(f"📊 {roth_str} · ${cash:,.0f} cash · {len(roth_snaps)} positions")
-    if winners:
-        lines.append(f"🟢 *Winners*   {' · '.join(winners)}")
-    if losers:
-        lines.append(f"🔴 *Laggards*  {' · '.join(losers)}")
+    def fmt_pnl(pct: float | None) -> str:
+        if pct is None:
+            return "   —  "
+        sign = "+" if pct >= 0 else ""
+        return f"{sign}{pct:.0f}%"
+
+    def fmt_conv(ticker: str) -> str:
+        c = conviction_by_ticker.get(ticker)
+        return f"{c:.0f}" if c is not None else " —"
+
+    # ── Holdings block (all Roth positions) ────────────────────────────────
+    holding_lines = []
+    for r in roth_rows_sorted:
+        cv = fmt_conv(r.ticker)
+        pnl = fmt_pnl(r.unrealized_pnl_pct)
+        val = fmt_k(r.market_value or 0)
+        holding_lines.append(f"  {r.ticker:<6} cv{cv:<3}  {pnl:<6}  {val}")
+
+    # ── Slot-specific header context ───────────────────────────────────────
+    slot_context = {
+        8:  "Pre-market — today\\'s full picture",
+        9:  "Open settled — first conviction read",
+        12: "Midday — session check-in",
+        14: "Power hour — late session positioning",
+        16: "Market closed — day recap",
+    }.get(hour, "Portfolio update")
+
+    # ── Build message ──────────────────────────────────────────────────────
+    lines: list[str] = []
+    lines.append(f"{slot_emoji} *Maverick {run_time} — {slot_label}*")
+    lines.append(f"_{slot_context}_")
     lines.append("")
-    lines.append("*Today\\'s moves (Roth)*")
-    if off_screen:
-        lines.append(f"❌ Exit   {' · '.join(off_screen)}")
+    lines.append(f"💰 Roth {fmt_k(roth_total)}  ·  {fmt_k(cash)} cash  ·  {len(roth_rows)} pos")
+    lines.append(f"📈 Conviction {conv_score:.0f}  ·  deployed {100*(roth_equity/roth_total):.0f}%" if roth_total else f"📈 Conviction {conv_score:.0f}")
+    lines.append("")
+    lines.append("*📋 Holdings (Roth — ranked by conviction)*")
+    lines.extend(holding_lines)
+    lines.append("")
+    lines.append("*🎯 Signals*")
     if potential_adds:
-        lines.append(f"➕ Add    {' · '.join(potential_adds)}")
-    if not off_screen and not potential_adds:
-        lines.append("_No actions — hold_")
+        lines.append(f"  ➕ Add    {' · '.join(potential_adds)}")
+    if off_screen:
+        lines.append(f"  ❌ Exit   {' · '.join(off_screen)}")
+    if not potential_adds and not off_screen:
+        lines.append("  _Hold — no changes_")
     lines.append("")
-    lines.append(f"*Traditional (hold forever)*  {trad_str}")
-    lines.append("\nNext run: 12:00pm ET" if "8:" in run_time else
-                 "\nNext run: 4:30pm ET" if "12:" in run_time else
-                 "\nSee you tomorrow 8:00am ET")
+    lines.append(f"🏛 Traditional {fmt_k(trad_value)}  ·  NVDA · PLTR · IREN · OKLO · COIN  _(hold forever)_")
+    lines.append("")
+    lines.append(f"⏭ Next: {next_run} ET")
 
     text = "\n".join(lines)
 
