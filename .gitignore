@@ -88,6 +88,10 @@ portfolio/
 vc/
 /data/
 docs/personal/
+obsidian/
+
+# BMAD personal overrides — installer-managed, not committed
+_bmad/custom/*.user.toml
 
 # Secrets and local config
 .env.*
