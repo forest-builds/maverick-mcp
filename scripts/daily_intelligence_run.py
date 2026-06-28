@@ -393,37 +393,53 @@ def _fetch_benchmark_return() -> dict[str, float | None]:
         return {}
 
 
-def _slot_meta(now: datetime) -> tuple[str, str, str, str]:
-    """Return (emoji, label, next_run_str, context) for the nearest of 3 daily slots."""
-    schedule = [(8, 0), (12, 30), (16, 15)]
-    labels   = ["🌅 Morning", "☀️ Midday", "🌙 Close"]
-    contexts = [
+def _slot_meta(now: datetime) -> tuple[str | None, str, str, str]:
+    """Return (slot_label|None, emoji, next_run_str, context).
+
+    slot_label is None for data-collection-only runs (no Telegram).
+    Send windows are ±25 minutes around each designated slot time so that
+    the 9:45 and 14:30 launchd runs collect snapshots silently without
+    sending duplicate Morning / premature Close messages.
+    """
+    SEND_SLOTS = [
+        (8,  0,  "Morning", "🌅"),
+        (12, 30, "Midday",  "☀️"),
+        (16, 15, "Close",   "🌙"),
+    ]
+    CONTEXTS = [
         "Command brief — prepare for the day",
         "Exception report — material changes only",
-        "Decision memo — what we learned, what\\'s next",
+        "Decision memo — what we learned, what's next",
     ]
+    WINDOW = 25  # minutes either side
+
     total = now.hour * 60 + now.minute
-    slot_mins = [h * 60 + m for h, m in schedule]
-    idx = min(range(len(slot_mins)), key=lambda i: abs(slot_mins[i] - total))
-    emoji_label = labels[idx]
-    emoji, label = emoji_label.split(" ", 1)
-    next_idx = idx + 1
-    if next_idx < len(schedule):
-        nh, nm = schedule[next_idx]
-        suffix = "am" if nh < 12 else "pm"
-        disp_h = nh if nh <= 12 else nh - 12
-        next_str = f"{disp_h}:{nm:02d}{suffix}"
-    else:
-        next_str = "8:00am tomorrow"
-    return emoji, label, next_str, contexts[idx]
+    for i, (h, m, label, emoji) in enumerate(SEND_SLOTS):
+        if abs(total - (h * 60 + m)) <= WINDOW:
+            next_i = i + 1
+            if next_i < len(SEND_SLOTS):
+                nh, nm_next = SEND_SLOTS[next_i][:2]
+                suffix = "am" if nh < 12 else "pm"
+                disp_h = nh if nh <= 12 else nh - 12
+                next_str = f"{disp_h}:{nm_next:02d}{suffix}"
+            else:
+                next_str = "8:00am tomorrow"
+            return label, emoji, next_str, CONTEXTS[i]
+
+    return None, "", "8:00am tomorrow", ""  # data-only run — no Telegram
 
 
 def _theme_analysis(
     roth_rows: list,
     prev_value_by_ticker: dict[str, float],
     roth_total: float = 0.0,
+    qqq_return: float | None = None,
 ) -> list[dict]:
-    """Return notable theme-level findings sorted by priority, with dollar weights."""
+    """Return notable theme-level findings sorted by priority, with dollar weights.
+
+    When qqq_return is provided, correlated-move descriptions include relative
+    performance vs QQQ so "sector beta" and "theme-specific" moves are distinguishable.
+    """
     findings = []
     for theme_name, theme_tickers in THEMES.items():
         in_theme = [r for r in roth_rows if r.ticker in theme_tickers]
@@ -454,6 +470,19 @@ def _theme_analysis(
             f"${theme_value/1000:.1f}k / {theme_pct:.0f}% of Roth / {len(in_theme)} pos"
         )
 
+        def _corr_context(avg_pct: float) -> str:
+            if qqq_return is not None:
+                rel = avg_pct - qqq_return
+                if abs(rel) < 1.0:
+                    return f"basket {avg_pct:+.1f}% ≈ QQQ {qqq_return:+.1f}% — likely market beta"
+                return (
+                    f"basket {avg_pct:+.1f}% vs QQQ {qqq_return:+.1f}%"
+                    f" ({rel:+.1f}% relative) — theme-specific move"
+                )
+            return "correlated move — treat as one risk event"
+
+        avg_move = sum(p for _, p in moves) / len(moves)
+
         base = {
             "theme": theme_name,
             "weight": weight_str,
@@ -465,11 +494,11 @@ def _theme_analysis(
         if all_dn and len(moves) >= 3:
             findings.append({**base, "priority": "high",
                 "title": f"{theme_name} basket all red",
-                "detail": f"{tickers_str} — correlated move, treat as one risk event"})
+                "detail": f"{tickers_str} — {_corr_context(avg_move)}"})
         elif all_up and len(moves) >= 3:
             findings.append({**base, "priority": "low",
                 "title": f"{theme_name} basket all green",
-                "detail": f"{tickers_str} — correlated strength"})
+                "detail": f"{tickers_str} — {_corr_context(avg_move)}"})
         elif diverge:
             findings.append({**base, "priority": "medium",
                 "title": f"{theme_name} diverging",
@@ -543,6 +572,7 @@ def _send_morning_command_brief(
     conviction_by_ticker: dict,
     theme_findings: list,
     cash: float,
+    cash_valid: bool,
     roth_equity: float,
     roth_total: float,
     off_screen: list,
@@ -560,13 +590,19 @@ def _send_morning_command_brief(
 
     lines = [f"🌅 *MAVERICK — MORNING BRIEF*", f"_{today} · {run_time} ET_", ""]
 
-    # Portfolio
-    lines.append("*PORTFOLIO*")
-    lines.append(
-        f"Roth {fmt_k(roth_total)}  ·  {len(roth_rows)} positions  ·  {deployed_pct}% deployed"
-    )
+    # Portfolio — always three fields so the definition never flips
+    lines.append("*ACCOUNT*")
+    if cash_valid:
+        lines.append(
+            f"Equity: {fmt_k(roth_total)}  ·  Invested: {fmt_k(roth_equity)}"
+            f"  ·  Cash: {fmt_k(cash)}  ·  {deployed_pct}% deployed"
+        )
+    else:
+        lines.append(
+            f"Invested: {fmt_k(roth_equity)}  ·  Cash: unavailable  ·  {len(roth_rows)} positions"
+        )
 
-    # Top 2 theme concentrations by value
+    # Top 2 theme concentrations by value with graduated risk icons
     theme_totals = sorted(
         [
             (name, sum(r.market_value or 0 for r in roth_rows if r.ticker in tks))
@@ -575,16 +611,20 @@ def _send_morning_command_brief(
         ],
         key=lambda x: x[1], reverse=True,
     )
-    if theme_totals:
+    if theme_totals and roth_total > 0:
         lines.append("Largest concentrations:")
         for name, val in theme_totals[:2]:
-            pct = int(val / roth_total * 100) if roth_total else 0
+            pct = val / roth_total * 100
+            icon = "🔴" if pct > 25 else "🟠" if pct > 20 else "🟡" if pct > 10 else "🟢"
             n   = sum(1 for r in roth_rows if r.ticker in THEMES[name])
-            lines.append(f"  • {name}: {fmt_k(val)} / {pct}% / {n} pos")
+            lines.append(f"  {icon} {name}: {fmt_k(val)} / {pct:.0f}% / {n} pos")
     lines.append("")
 
     # Cash interpretation — floor and target separately
-    lines.extend(_interpret_cash(cash, roth_total))
+    if cash_valid:
+        lines.extend(_interpret_cash(cash, roth_total))
+    else:
+        lines.append("⚠️ Cash balance unavailable — deployment metrics suppressed")
     lines.append("")
 
     # Attention map — theme findings + capital misalignment
@@ -655,52 +695,55 @@ def _send_midday_exception_report(
     tg,
     roth_rows: list,
     prev_value_by_ticker: dict,
-    position_dollar_deltas: dict,
-    theme_findings: list,
-    day_delta: float,
+    intraday_dollar_deltas: dict,
+    theme_findings_intraday: list,
+    intraday_delta: float,
+    benchmark_returns: dict,
     fmt_k,
     now: datetime,
     next_run: str,
     **_,
 ) -> None:
-    """Single midday message: exceptions only. Lists checks performed when quiet."""
+    """Single midday message: exceptions only. Moves labeled 'since morning'."""
     run_time = now.strftime("%I:%M%p").lstrip("0")
 
-    # Identify big movers (>3%) not already covered by theme findings
+    # Identify big movers (>3% since morning) not already covered by theme findings
     theme_reported: set[str] = set()
-    for f in theme_findings:
+    for f in theme_findings_intraday:
         theme_reported.update(THEMES.get(f["theme"], set()))
 
-    big_movers: list[tuple[str, float, float | None]] = []
+    big_movers: list[tuple[str, float]] = []
     for r in roth_rows:
         prev = prev_value_by_ticker.get(r.ticker)
         cur  = r.market_value or 0
         if prev and prev > 0:
             pct = (cur - prev) / prev * 100
             if abs(pct) >= 3.0:
-                big_movers.append((r.ticker, pct, r.unrealized_pnl_pct))
+                big_movers.append((r.ticker, pct))
     big_movers.sort(key=lambda x: abs(x[1]), reverse=True)
 
-    is_quiet = not big_movers and not theme_findings
+    is_quiet = not big_movers and not theme_findings_intraday
 
     lines = [f"☀️ *MAVERICK MIDDAY — {run_time}*", ""]
 
     if is_quiet:
-        lines.append("_No material exceptions._")
-        lines.append("Checked: theme correlation, moves >3%, volume context, thesis triggers.")
-        lines.append("No thesis changes. No action triggers. Portfolio steady.")
+        lines.append("_No material exceptions since morning._")
+        lines.append("Checked: theme correlation, moves >3% since open, volume context, thesis triggers.")
+        lines.append("No thesis changes. No action triggers.")
         lines.append("")
         lines.append(f"_Next: {next_run} ET_")
     else:
-        direction = "strengthened" if day_delta >= 0 else "softened"
-        delta_str = f"+${day_delta:,.0f}" if day_delta >= 0 else f"-${abs(day_delta):,.0f}"
-        lines.append(f"*BOTTOM LINE:* Portfolio {direction} {delta_str} since open.")
+        direction = "up" if intraday_delta >= 0 else "down"
+        delta_str = f"+${intraday_delta:,.0f}" if intraday_delta >= 0 else f"-${abs(intraday_delta):,.0f}"
+        qqq = benchmark_returns.get("QQQ")
+        qqq_str = f"  (QQQ {'+' if qqq and qqq >= 0 else ''}{qqq:.2f}%)" if qqq is not None else ""
+        lines.append(f"*BOTTOM LINE:* Portfolio {direction} {delta_str} since morning.{qqq_str}")
         lines.append("")
-        lines.append("*MATERIAL CHANGES*")
+        lines.append("*MATERIAL CHANGES SINCE MORNING*")
 
         # Theme basket moves first — 1 event, not N tickers
         reported_tickers: set[str] = set()
-        for item in theme_findings[:3]:
+        for item in theme_findings_intraday[:3]:
             icon = "🔴" if item["priority"] == "high" else "🟠"
             dd   = item.get("dollar_delta", 0.0)
             dd_str = f"  ({'+' if dd >= 0 else ''}${dd:,.0f})" if abs(dd) >= 10 else ""
@@ -710,16 +753,16 @@ def _send_midday_exception_report(
             reported_tickers.update(THEMES.get(item["theme"], set()))
 
         # Solo movers not covered by a theme basket
-        solo_movers = [(t, p, tp) for t, p, tp in big_movers if t not in reported_tickers]
-        for ticker, pct, total_pct in solo_movers[:3]:
+        solo_movers = [(t, p) for t, p in big_movers if t not in reported_tickers]
+        for ticker, pct in solo_movers[:3]:
             sign = "▲" if pct >= 0 else "▼"
             icon = "🔴" if abs(pct) >= 5 else "🟠"
-            dd   = position_dollar_deltas.get(ticker, 0.0)
+            dd   = intraday_dollar_deltas.get(ticker, 0.0)
             dd_str = f"  ({'+' if dd >= 0 else ''}${dd:,.0f})" if abs(dd) >= 10 else ""
             in_any_theme = any(ticker in tks for tks in THEMES.values())
             classification = "possible sector move" if in_any_theme else "cause unclassified"
             lines.append(
-                f"{icon} *{ticker}* {sign}{abs(pct):.1f}%{dd_str} — {classification}"
+                f"{icon} *{ticker}* {sign}{abs(pct):.1f}% since morning{dd_str} — {classification}"
             )
             lines.append("")
 
@@ -738,13 +781,15 @@ def _send_close_decision_memo(
     tg,
     roth_rows: list,
     conviction_by_ticker: dict,
-    prev_value_by_ticker: dict,
+    prior_close_value_by_ticker: dict,
     position_dollar_deltas: dict,
     theme_findings: list,
     day_delta: float,
+    has_prior_close: bool,
     roth_equity: float,
     roth_total: float,
     cash: float,
+    cash_valid: bool,
     off_screen: list,
     benchmark_returns: dict,
     fmt_k,
@@ -757,65 +802,77 @@ def _send_close_decision_memo(
 
     today    = date.today().strftime("%b %d")
     run_time = now.strftime("%I:%M%p").lstrip("0")
-    deployed_pct   = int(100 * roth_equity / roth_total) if roth_total else 100
-    prior_value    = roth_total - day_delta
-    day_return_pct = (day_delta / prior_value * 100) if prior_value > 0 else 0.0
-    delta_sign     = "+" if day_delta >= 0 else "-"
-    delta_str      = f"{delta_sign}${abs(day_delta):,.0f}"
+    deployed_pct = int(100 * roth_equity / roth_total) if roth_total else 100
 
     lines = [f"🌙 *MAVERICK CLOSE — {today}*", f"_{run_time} ET_", ""]
 
-    # Performance
+    # Account — always three fields
+    lines.append("*ACCOUNT*")
+    if cash_valid:
+        lines.append(
+            f"Equity: {fmt_k(roth_total)}  ·  Invested: {fmt_k(roth_equity)}"
+            f"  ·  Cash: {fmt_k(cash)}  ·  {deployed_pct}% deployed"
+        )
+    else:
+        lines.append(f"Invested: {fmt_k(roth_equity)}  ·  Cash: unavailable")
+    lines.append("")
+
+    # Performance — only show P&L when we have a valid prior-close baseline
     lines.append("*PERFORMANCE*")
-    ret_sign = "+" if day_return_pct >= 0 else ""
-    lines.append(
-        f"Roth {fmt_k(roth_total)}  ({delta_str} / {ret_sign}{day_return_pct:.2f}%)  ·  "
-        f"{deployed_pct}% deployed"
-    )
+    if has_prior_close:
+        prior_value    = roth_equity - day_delta   # prior invested equity
+        day_return_pct = (day_delta / prior_value * 100) if prior_value > 0 else 0.0
+        delta_sign     = "+" if day_delta >= 0 else "-"
+        delta_str      = f"{delta_sign}${abs(day_delta):,.0f}"
+        ret_sign       = "+" if day_return_pct >= 0 else ""
+        lines.append(f"Daily: {delta_str} / {ret_sign}{day_return_pct:.2f}%")
 
-    if benchmark_returns:
-        bench_parts: list[str] = []
-        for sym in ("QQQ", "IWM", "SPY"):
-            br = benchmark_returns.get(sym)
-            if br is not None:
-                bench_parts.append(f"{sym} {'+' if br >= 0 else ''}{br:.2f}%")
-        if bench_parts:
-            lines.append(f"Benchmark:  {' · '.join(bench_parts)}")
-        qqq = benchmark_returns.get("QQQ")
-        if qqq is not None:
-            excess = day_return_pct - qqq
-            lines.append(f"vs QQQ: {'+' if excess >= 0 else ''}{excess:.2f}%")
+        if benchmark_returns:
+            bench_parts: list[str] = []
+            for sym in ("QQQ", "IWM", "SPY"):
+                br = benchmark_returns.get(sym)
+                if br is not None:
+                    bench_parts.append(f"{sym} {'+' if br >= 0 else ''}{br:.2f}%")
+            if bench_parts:
+                lines.append(f"Benchmarks: {' · '.join(bench_parts)}")
+            qqq = benchmark_returns.get("QQQ")
+            if qqq is not None:
+                excess = day_return_pct - qqq
+                lines.append(f"vs QQQ: {'+' if excess >= 0 else ''}{excess:.2f}%")
+    else:
+        lines.append("⚠️ P&L unavailable — no prior-close snapshot found.")
+        lines.append("_Attribution and benchmark comparison suppressed._")
     lines.append("")
 
-    # Attribution — position level (dollar contribution)
-    lines.append("*ATTRIBUTION*")
-    sorted_by_delta = sorted(position_dollar_deltas.items(), key=lambda x: x[1])
-    detractors  = [(t, d) for t, d in sorted_by_delta if d < -5][:3]
-    contributors = [(t, d) for t, d in reversed(sorted_by_delta) if d > 5][:3]
+    # Attribution — only when we have valid daily P&L
+    if has_prior_close and position_dollar_deltas:
+        lines.append("*ATTRIBUTION*")
+        sorted_by_delta = sorted(position_dollar_deltas.items(), key=lambda x: x[1])
+        detractors   = [(t, d) for t, d in sorted_by_delta if d < -5][:3]
+        contributors = [(t, d) for t, d in reversed(sorted_by_delta) if d > 5][:3]
 
-    if detractors:
-        lines.append("Detractors:")
-        for t, d in detractors:
-            share = f"  ({abs(d) / abs(day_delta) * 100:.0f}% of loss)" if day_delta < 0 else ""
-            lines.append(f"  {t}  ${d:,.0f}{share}")
-    if contributors:
-        lines.append("Contributors:")
-        for t, d in contributors:
-            share = f"  ({d / day_delta * 100:.0f}% of gain)" if day_delta > 0 else ""
-            lines.append(f"  {t}  +${d:,.0f}{share}")
+        if detractors:
+            lines.append("Detractors (vs prior close):")
+            for t, d in detractors:
+                share = f"  ({abs(d) / abs(day_delta) * 100:.0f}% of loss)" if day_delta < 0 else ""
+                lines.append(f"  {t}  ${d:,.0f}{share}")
+        if contributors:
+            lines.append("Contributors (vs prior close):")
+            for t, d in contributors:
+                share = f"  ({d / day_delta * 100:.0f}% of gain)" if day_delta > 0 else ""
+                lines.append(f"  {t}  +${d:,.0f}{share}")
 
-    # Theme attribution
-    theme_deltas: list[tuple[str, float]] = []
-    for theme_name, theme_tickers in THEMES.items():
-        td = sum(position_dollar_deltas.get(t, 0.0) for t in theme_tickers)
-        if abs(td) >= 10:
-            theme_deltas.append((theme_name, td))
-    theme_deltas.sort(key=lambda x: x[1])
-    if theme_deltas:
-        lines.append("By theme:")
-        for name, td in theme_deltas:
-            lines.append(f"  {name}: {'+' if td >= 0 else ''}${td:,.0f}")
-    lines.append("")
+        theme_deltas: list[tuple[str, float]] = []
+        for theme_name, theme_tickers in THEMES.items():
+            td = sum(position_dollar_deltas.get(t, 0.0) for t in theme_tickers)
+            if abs(td) >= 10:
+                theme_deltas.append((theme_name, td))
+        theme_deltas.sort(key=lambda x: x[1])
+        if theme_deltas:
+            lines.append("By theme:")
+            for name, td in theme_deltas:
+                lines.append(f"  {name}: {'+' if td >= 0 else ''}${td:,.0f}")
+        lines.append("")
 
     # What the market told us
     lines.append("*WHAT THE MARKET TOLD US*")
@@ -828,7 +885,7 @@ def _send_close_decision_memo(
 
     solo_movers: list[tuple[str, float]] = []
     for r in roth_rows:
-        prev = prev_value_by_ticker.get(r.ticker)
+        prev = prior_close_value_by_ticker.get(r.ticker)
         cur  = r.market_value or 0
         if prev and prev > 0:
             pct = (cur - prev) / prev * 100
@@ -839,10 +896,10 @@ def _send_close_decision_memo(
         sign = "+" if pct >= 0 else ""
         in_theme = any(ticker in tks for tks in THEMES.values())
         classification = "possible sector move" if in_theme else "cause unclassified"
-        lines.append(f"• {ticker} {sign}{pct:.1f}% — {classification}")
+        lines.append(f"• {ticker} {sign}{pct:.1f}% vs prior close — {classification}")
 
     if not theme_findings and not solo_movers:
-        lines.append("• No material moves — portfolio flat")
+        lines.append("• No material moves vs prior close")
     lines.append("")
 
     # Thesis ledger
@@ -852,21 +909,27 @@ def _send_close_decision_memo(
     lines.append("_Price action alone does not change fundamental conviction._")
     lines.append("")
 
-    # Risk — theme $ weights, not just position counts
+    # Risk — graduated thresholds, sub-40 capital as % of invested
     low_cv_cap   = sum(r.market_value or 0 for r in roth_rows if conviction_by_ticker.get(r.ticker, 50) < 40)
     low_cv_count = sum(1 for r in roth_rows if conviction_by_ticker.get(r.ticker, 50) < 40)
-    cash_pct     = int(100 * cash / roth_total) if roth_total else 0
+    low_cv_pct   = int(low_cv_cap / roth_equity * 100) if roth_equity > 0 else 0
 
     lines.append("*RISK*")
     for theme_name, theme_tickers in THEMES.items():
         in_theme = [r for r in roth_rows if r.ticker in theme_tickers]
-        if len(in_theme) >= 3:
+        if len(in_theme) >= 2:
             tv  = sum(r.market_value or 0 for r in in_theme)
-            pct = int(tv / roth_total * 100) if roth_total else 0
-            lines.append(f"🔴 {theme_name}: {fmt_k(tv)} / {pct}% across {len(in_theme)} pos")
-    if low_cv_cap >= 1500:
-        lines.append(f"🔴 Sub-40 conviction: {fmt_k(low_cv_cap)} across {low_cv_count} positions")
-    lines.extend(_interpret_cash(cash, roth_total))
+            pct = tv / roth_total * 100 if roth_total > 0 else 0
+            if pct >= 5:
+                icon = "🔴" if pct > 25 else "🟠" if pct > 20 else "🟡" if pct > 10 else "🟢"
+                lines.append(f"{icon} {theme_name}: {fmt_k(tv)} / {pct:.0f}% across {len(in_theme)} pos")
+    if low_cv_cap >= 1000:
+        icon = "🔴" if low_cv_pct > 25 else "🟠" if low_cv_pct > 15 else "🟡"
+        lines.append(f"{icon} Sub-40 conviction: {fmt_k(low_cv_cap)} / {low_cv_pct}% of invested ({low_cv_count} pos)")
+    if cash_valid:
+        lines.extend(_interpret_cash(cash, roth_total))
+    else:
+        lines.append("⚠️ Cash balance unavailable — reserve check skipped")
     lines.append("")
 
     # Tomorrow's queue — specific, actionable
@@ -931,23 +994,39 @@ def send_run_alert(brief: dict) -> None:
     from maverick_mcp.data.models import SessionLocal
     from maverick_mcp.vc_loop.models import PositionSnapshot, ThesisLedger
 
+    from sqlalchemy import Date, cast, func as sa_func
+
     screen = brief.get("screen", {})
     now    = datetime.now()
-    _, slot_label, next_run, _ = _slot_meta(now)
+    slot_label, _, next_run, _ = _slot_meta(now)
 
-    # Load the two most recent snapshot batches
+    # Data-only runs (9:45, 14:30) — snapshot already saved; nothing to send.
+    if slot_label is None:
+        logger.info("Data-only run at %s — snapshot saved, no Telegram message", now.strftime("%H:%M"))
+        return
+
+    # ── Load snapshots ─────────────────────────────────────────────────────────
+    # We need three reference points:
+    #   1. latest   — this run (just written)
+    #   2. prev_snap — most recent snapshot before this one (intraday delta)
+    #   3. prior_close — most recent snapshot from a PREVIOUS calendar day (daily P&L)
+    today_date = now.date()
+
     with SessionLocal() as session:
-        recent_times = (
-            session.query(PositionSnapshot.snapshot_at)
-            .filter(PositionSnapshot.position_closed == False)  # noqa: E712
-            .distinct()
-            .order_by(desc(PositionSnapshot.snapshot_at))
-            .limit(2)
-            .all()
-        )
-        times     = [r[0] for r in recent_times]
-        latest_at = times[0] if times else None
-        prev_at   = times[1] if len(times) > 1 else None
+        def _max_snap_at(extra_filters=None):
+            q = (
+                session.query(sa_func.max(PositionSnapshot.snapshot_at))
+                .filter(PositionSnapshot.position_closed == False)  # noqa: E712
+            )
+            for f in (extra_filters or []):
+                q = q.filter(f)
+            return q.scalar()
+
+        latest_at    = _max_snap_at()
+        prev_snap_at = _max_snap_at([PositionSnapshot.snapshot_at < latest_at]) if latest_at else None
+        prior_close_at = _max_snap_at([
+            cast(PositionSnapshot.snapshot_at, Date) < str(today_date),
+        ])
 
         def _load_snaps(at):
             if not at:
@@ -961,9 +1040,14 @@ def send_run_alert(brief: dict) -> None:
                 .all()
             )
 
-        snap_rows = _load_snaps(latest_at)
-        prev_rows = _load_snaps(prev_at)
-        prev_value_by_ticker = {r.ticker: r.market_value or 0 for r in prev_rows}
+        snap_rows       = _load_snaps(latest_at)
+        prev_snap_rows  = _load_snaps(prev_snap_at)
+        prior_close_rows = _load_snaps(prior_close_at)
+
+        # "since last report" (intraday) — used in midday exception logic
+        prev_value_by_ticker  = {r.ticker: r.market_value or 0 for r in prev_snap_rows}
+        # "since prior close" — the correct daily P&L baseline
+        prior_close_value_by_ticker = {r.ticker: r.market_value or 0 for r in prior_close_rows}
 
         conviction_by_ticker: dict[str, float] = {}
         for row in snap_rows:
@@ -976,8 +1060,11 @@ def send_run_alert(brief: dict) -> None:
             if thesis and thesis.conviction is not None:
                 conviction_by_ticker[row.ticker] = thesis.conviction
 
-    # Cash from Schwab account summary
+    # Cash from Schwab account summary — sum across ALL accounts.
+    # Schwab IRA accounts are not typed "CASH"; filtering by type silently drops the balance.
+    # Traditional account is fully invested so its cash_balance is negligible.
     cash = 0.0
+    cash_valid = False
     try:
         from maverick_mcp.api.routers.schwab import _load_schwab
         from maverick_mcp.providers.schwab.client import SchwabClient
@@ -986,36 +1073,46 @@ def send_run_alert(brief: dict) -> None:
         cfg, store = _load_schwab()
         client     = SchwabClient(cfg, store)
         summaries  = summarize_accounts(client.accounts())
-        for s in summaries:
-            if s.account_type == "CASH":
-                cash = float(s.cash_balance or 0)
-    except Exception:
-        pass
+        cash = sum(float(s.cash_balance or 0) for s in summaries)
+        cash_valid = True
+    except Exception as exc:
+        logger.warning("Cash balance unavailable: %s", exc)
 
     # Split Roth / long-term account
-    roth_rows  = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
+    roth_rows   = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
     roth_equity = sum(r.market_value or 0 for r in roth_rows)
     roth_total  = roth_equity + cash
 
-    roth_tickers = {r.ticker for r in roth_rows}
-    off_screen   = [t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS]
+    off_screen = [t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS]
 
-    # ── Single source of truth: P&L attribution ───────────────────────────────
-    # Computed once here; all slot builders receive it — no independent recalculation.
+    # ── P&L attribution ────────────────────────────────────────────────────────
+    # Daily P&L (vs prior trading-day close) — this is the authoritative number.
+    has_prior_close = bool(prior_close_value_by_ticker)
     position_dollar_deltas: dict[str, float] = {}
     for r in roth_rows:
-        prev = prev_value_by_ticker.get(r.ticker)
+        prev = prior_close_value_by_ticker.get(r.ticker)
         if prev is not None:
             position_dollar_deltas[r.ticker] = (r.market_value or 0) - prev
     day_delta = sum(position_dollar_deltas.values())
 
-    # Theme analysis computed once and shared
-    theme_findings = _theme_analysis(roth_rows, prev_value_by_ticker, roth_total)
+    # Intraday delta (vs previous snapshot, same or different day) — for midday "since open"
+    intraday_dollar_deltas: dict[str, float] = {}
+    for r in roth_rows:
+        prev = prev_value_by_ticker.get(r.ticker)
+        if prev is not None:
+            intraday_dollar_deltas[r.ticker] = (r.market_value or 0) - prev
+    intraday_delta = sum(intraday_dollar_deltas.values())
 
-    # Benchmark only at close — markets are settled, data is final
-    benchmark_returns: dict[str, float | None] = {}
-    if slot_label == "Close":
-        benchmark_returns = _fetch_benchmark_return()
+    # ── Benchmark at all send slots ────────────────────────────────────────────
+    # Morning: pre-market QQQ  |  Midday: intraday QQQ  |  Close: final QQQ
+    benchmark_returns: dict[str, float | None] = _fetch_benchmark_return()
+    qqq_return: float | None = benchmark_returns.get("QQQ") if benchmark_returns else None
+
+    # ── Theme analysis ─────────────────────────────────────────────────────────
+    # Morning / Close: compare vs prior close (overnight / daily moves)
+    # Midday: compare vs prior snapshot (since-morning moves)
+    theme_findings = _theme_analysis(roth_rows, prior_close_value_by_ticker, roth_total, qqq_return)
+    theme_findings_intraday = _theme_analysis(roth_rows, prev_value_by_ticker, roth_total, qqq_return)
 
     def fmt_k(val: float) -> str:
         return f"${val / 1000:.1f}k" if val >= 1000 else f"${val:.0f}"
@@ -1037,10 +1134,16 @@ def send_run_alert(brief: dict) -> None:
         roth_rows=roth_rows,
         conviction_by_ticker=conviction_by_ticker,
         prev_value_by_ticker=prev_value_by_ticker,
+        prior_close_value_by_ticker=prior_close_value_by_ticker,
         position_dollar_deltas=position_dollar_deltas,
+        intraday_dollar_deltas=intraday_dollar_deltas,
         theme_findings=theme_findings,
+        theme_findings_intraday=theme_findings_intraday,
         day_delta=day_delta,
+        intraday_delta=intraday_delta,
+        has_prior_close=has_prior_close,
         cash=cash,
+        cash_valid=cash_valid,
         roth_equity=roth_equity,
         roth_total=roth_total,
         off_screen=off_screen,
@@ -1061,9 +1164,6 @@ def send_run_alert(brief: dict) -> None:
     elif slot_label == "Close":
         _send_close_decision_memo(**common)
         logger.info("Close decision memo sent (1 message)")
-
-    else:
-        logger.warning("Unknown slot_label '%s' — no message sent", slot_label)
 
 
 async def main() -> None:
