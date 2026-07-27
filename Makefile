@@ -1,7 +1,7 @@
 # Maverick-MCP Makefile
 # Central command interface for agent-friendly development
 
-.PHONY: help dev dev-sse dev-http dev-stdio stop test test-all test-watch test-specific test-parallel test-cov test-speed test-speed-quick test-speed-emergency test-speed-comparison test-strategies lint format typecheck docs-check clean tail-log backend check migrate setup redis-start redis-stop experiment experiment-once benchmark-parallel benchmark-speed docker-up docker-down docker-logs
+.PHONY: help dev dev-sse dev-http dev-stdio stop test test-all test-watch test-specific test-parallel test-cov test-speed test-speed-quick test-speed-emergency test-speed-comparison test-strategies lint format typecheck docs-check clean tail-log backend check migrate setup redis-start redis-stop experiment experiment-once benchmark-parallel benchmark-speed docker-up docker-down docker-logs schwab-reconnect
 
 # Default target
 help:
@@ -35,6 +35,8 @@ help:
 	@echo ""
 	@echo "  make tail-log     - Follow backend logs"
 	@echo ""
+	@echo "  make schwab-reconnect - Re-link Schwab (browser login, auto-captures code)"
+	@echo ""
 	@echo "  make experiment   - Watch and auto-run .py files"
 	@echo "  make benchmark-parallel - Test parallel screening"
 	@echo "  make benchmark-speed - Run comprehensive speed benchmark"
@@ -45,6 +47,10 @@ help:
 	@echo "  make docker-up    - Start with Docker"
 	@echo "  make docker-down  - Stop Docker services"
 	@echo "  make docker-logs  - View Docker logs"
+
+# Broker
+schwab-reconnect:
+	uv run python scripts/schwab_reconnect.py
 
 # Development commands
 dev:

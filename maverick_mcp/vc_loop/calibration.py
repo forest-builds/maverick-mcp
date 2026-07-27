@@ -328,6 +328,29 @@ def review_theses(
             )
             continue
 
+        # Same-day-outcome guard. ``_price_on_or_after`` returns the first close
+        # on OR AFTER its target, so a gap in the price cache can make the entry
+        # lookup jump forward to the very same row the exit lookup lands on —
+        # yielding a bogus 0.0% return that was previously recorded as a "win".
+        # If the entry itself already sits at/after the target date, or the exit
+        # is not strictly after the entry, there is no real holding window: leave
+        # the thesis unresolved (skipped) rather than fabricating a flat outcome.
+        if (
+            entry.observed_date >= target_date
+            or exit_.observed_date <= entry.observed_date
+        ):
+            skipped.append(
+                {
+                    "id": row.id,
+                    "ticker": row.ticker,
+                    "reason": "unresolved_price_window",
+                    "entry_date": entry.observed_date.isoformat(),
+                    "exit_date": exit_.observed_date.isoformat(),
+                    "target_date": target_date.isoformat(),
+                }
+            )
+            continue
+
         return_pct = ((exit_.close_price - entry.close_price) / entry.close_price) * 100
         win = return_pct >= min_return_pct
         outcome = {

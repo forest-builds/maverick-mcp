@@ -11,12 +11,22 @@ an execution instruction.
 from __future__ import annotations
 
 # Weights for each feature, summing to 1.0.
+#
+# Calibrated against 1,882 real 7-day thesis outcomes (Spearman vs forward
+# return). screening_score is the only reliably predictive feature (+0.173) and
+# now carries the majority of the weight. technical_strength backtested as
+# ANTI-predictive (-0.048) with only three discrete values, so it is cut to a
+# 0.05 floor rather than removed — the learning loop (calibration.learned_weights,
+# which floors non-predictive features at 0.05) can keep it there or let it earn
+# back influence if the edge ever turns positive. momentum / sentiment /
+# catalyst are freshly revived (previously dead constants); they keep modest,
+# nonzero weight so the learning loop can attribute real edge to them over time.
 WEIGHTS: dict[str, float] = {
-    "screening_score": 0.35,
-    "technical_strength": 0.25,
-    "sentiment_confidence": 0.20,
+    "screening_score": 0.55,
+    "technical_strength": 0.05,
+    "sentiment_confidence": 0.15,
     "catalyst_proximity": 0.10,
-    "momentum": 0.10,
+    "momentum": 0.15,
 }
 
 # Neutral defaults used when a feature is missing. Most features are centered
