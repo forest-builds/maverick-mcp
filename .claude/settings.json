@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(ls -la:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(cat:*)",
+      "Bash(make:*)",
+      "Read(*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FILE=$(jq -r '.tool_input.file_path'); case \"$FILE\" in *.py) uv run ruff format \"$FILE\" >/dev/null 2>&1 || true;; esac"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FILE=$(jq -r '.tool_input.file_path'); case \"$FILE\" in *uv.lock|*.env|*.env.*|*maverick_mcp.db|*alembic/versions/*.py) echo '{\"decision\":\"block\",\"reason\":\"Protected path — lockfile/env/db/applied-migration edits require explicit human action, not agent Edit/Write.\"}';; esac"
+          }
+        ]
+      }
+    ]
+  }
+}
