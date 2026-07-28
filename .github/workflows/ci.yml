@@ -111,6 +111,10 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           chmod +x gitleaks
       - name: Gitleaks full-history scan
+        # .gitleaksignore (fingerprints only, no secret content) auto-loads and
+        # suppresses 5 pre-existing matches, triaged and confirmed not-secrets
+        # (hash, doc placeholder, test fixtures) — see docs/vault-context.md.
+        # New secrets still fail this step.
         run: ./gitleaks detect --source . --log-opts="--all" --redact
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
         with:

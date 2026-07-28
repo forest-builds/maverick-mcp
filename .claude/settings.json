@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "FILE=$(jq -r '.tool_input.file_path'); case \"$FILE\" in *.py) uv run ruff format \"$FILE\" >/dev/null 2>&1 || true;; esac"
+            "command": "FILE=$(jq -r '.tool_input.file_path // empty'); case \"$FILE\" in *.py) uv run ruff format \"$FILE\" >/dev/null 2>&1 || true;; esac"
           }
         ]
       }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "FILE=$(jq -r '.tool_input.file_path'); case \"$FILE\" in *uv.lock|*.env|*.env.*|*maverick_mcp.db|*alembic/versions/*.py) echo '{\"decision\":\"block\",\"reason\":\"Protected path — lockfile/env/db/applied-migration edits require explicit human action, not agent Edit/Write.\"}';; esac"
+            "command": "FILE=$(jq -r '.tool_input.file_path // empty'); case \"$FILE\" in *.env.example|*.env.sample) ;; *uv.lock|*.env|*.env.*|*maverick_mcp.db*|*alembic/versions/*.py) echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Protected path — lockfile/env/db/applied-migration edits require explicit human action, not agent Edit/Write.\"}}';; esac"
           }
         ]
       }

@@ -30,6 +30,13 @@ advice, tax advice, or a trading system.
 Keep this file concise. Treat it as the table of contents for future agents.
 Durable detail belongs in `docs/`.
 
+- `docs/vault-context.md`: load at the start of every session — current work,
+  open questions, key decisions. Shared context across every agent CLI working in
+  this repo, not just one tool's private memory. Update it when project state
+  meaningfully changes.
+- `TODOS.md`: task queue. Check at session start; add work here instead of losing
+  it to a chat transcript.
+- `docs/conventions.md`: recurring patterns to avoid that linters can't catch.
 - `docs/INDEX.md`: start here for the documentation structure.
 - `docs/CATALOG.md`: status of current, historical, archived, and deleted docs.
 - `docs/ARCHITECTURE.md`: package layout, service boundaries, and data flow.
@@ -123,7 +130,7 @@ starts a new plan for that.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **maverick-mcp** (21433 symbols, 38302 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **maverick-mcp** (21784 symbols, 38807 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

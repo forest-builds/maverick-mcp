@@ -36,6 +36,8 @@ Status labels:
 | `testing/exa-research.md` | current | engineering | Exa/research provider test strategy. |
 | `testing/speed.md` | current | engineering | Research speed validation. |
 | `references/llm-documentation-hygiene.md` | current | docs | Agent-legible documentation rules. |
+| `vault-context.md` | current | docs | Cross-agent session state: current work, open questions, key decisions. |
+| `conventions.md` | current | docs | Recurring patterns to avoid that linters can't catch. |
 
 ## Historical
 

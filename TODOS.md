@@ -5,7 +5,8 @@
 ## Now
 
 - [ ] Decide on a repo-wide `ruff format`/`ruff --fix` cleanup — the new pre-commit hook found 52 files needing changes on first run (tree isn't ruff-clean yet; see docs/vault-context.md)
-- [ ] Deep `.gitignore` audit (deferred — see `_bmad-output/implementation-artifacts/deferred-work.md`), including: `.claude/settings.local.json` is tracked in git despite a `.gitignore` rule for it (added after the file was already committed)
+- [ ] Deep `.gitignore` audit (deferred — see `_bmad-output/implementation-artifacts/deferred-work.md`)
+- [ ] Decide whether to switch `.pre-commit-config.yaml`'s gitleaks hook from `gitleaks` (builds from source, needs a local Go toolchain) to `gitleaks-system` (uses a pre-installed `gitleaks` binary — already on this machine via Homebrew)
 
 ## Next
 

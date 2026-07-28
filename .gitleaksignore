@@ -1,0 +1,5 @@
+c716e2931fe622b7e8e8c70e01acfb7d3f901523:_bmad/_config/files-manifest.csv:generic-api-key:47
+09f20d23860a28f4f47d2ac6a855b0d6e858a74c:docs/SETUP_SELF_CONTAINED.md:curl-auth-header:262
+09f20d23860a28f4f47d2ac6a855b0d6e858a74c:docs/SETUP_SELF_CONTAINED.md:curl-auth-header:266
+09f20d23860a28f4f47d2ac6a855b0d6e858a74c:tests/conftest.py:private-key:127
+09f20d23860a28f4f47d2ac6a855b0d6e858a74c:tests/test_security_penetration.py:jwt:81
