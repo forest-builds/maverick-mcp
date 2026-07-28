@@ -14,10 +14,16 @@ Claude Code hooks (format-after-edit, protected-path guard). See
 ## Open hypotheses / unresolved questions
 
 - A deep `.gitignore` audit is still pending (deferred — see
-  `_bmad-output/implementation-artifacts/deferred-work.md`).
+  `_bmad-output/implementation-artifacts/deferred-work.md`). Known finding so far:
+  `.claude/settings.local.json` is tracked in git despite a `.gitignore` rule for it
+  (the rule was added after the file was already committed; needs `git rm --cached`
+  with explicit sign-off, not a silent fix).
 - `pip-audit` found 50 known CVEs across 14 dependencies (aiohttp, starlette, mcp,
   langchain, cryptography, pillow, and others), all with fix versions already
   published. Not yet triaged or scheduled.
+- The repo isn't ruff-clean: `pre-commit run --all-files` wants to touch 52 files
+  (45 reformatted, 12 auto-fixed, 5 left with unfixed lint errors). Not applied —
+  needs a human decision on whether/when to take that diff.
 
 ## Key decisions (last 30 days)
 
