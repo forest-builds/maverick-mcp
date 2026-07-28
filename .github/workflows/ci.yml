@@ -95,3 +95,32 @@ jobs:
             -m "not integration and not slow and not external" \
             --maxfail=5 \
             --timeout=60
+
+  security:
+    name: Security (gitleaks, bandit, pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+      - name: Gitleaks full-history scan
+        run: ./gitleaks detect --source . --log-opts="--all" --redact
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --extra dev --frozen
+      - name: Bandit (informational — pre-existing findings not yet triaged)
+        continue-on-error: true
+        run: uv run bandit -r maverick_mcp -ll
+      - name: pip-audit (informational — pre-existing CVE backlog, see Dependabot)
+        continue-on-error: true
+        run: uv run pip-audit
