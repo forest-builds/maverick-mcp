@@ -1,7 +1,7 @@
 # Maverick-MCP Makefile
 # Central command interface for agent-friendly development
 
-.PHONY: help dev dev-sse dev-http dev-stdio stop test test-all test-watch test-specific test-parallel test-cov test-speed test-speed-quick test-speed-emergency test-speed-comparison test-strategies lint format typecheck docs-check clean tail-log backend check migrate setup redis-start redis-stop experiment experiment-once benchmark-parallel benchmark-speed docker-up docker-down docker-logs schwab-reconnect
+.PHONY: help dev dev-sse dev-http dev-stdio stop test test-all test-watch test-specific test-parallel test-cov test-speed test-speed-quick test-speed-emergency test-speed-comparison test-strategies lint format typecheck docs-check clean tail-log backend check migrate setup redis-start redis-stop experiment experiment-once benchmark-parallel benchmark-speed docker-up docker-down docker-logs schwab-reconnect watch watch-add watch-remove
 
 # Default target
 help:
@@ -51,6 +51,14 @@ help:
 # Broker
 schwab-reconnect:
 	uv run python scripts/schwab_reconnect.py
+
+# Watchlist / entry radar — where every holding + eyed name sits in its range
+watch:
+	uv run python scripts/watch.py
+watch-add:
+	uv run python scripts/watch.py --add $(SYM) $(if $(NOTE),--note "$(NOTE)",)
+watch-remove:
+	uv run python scripts/watch.py --remove $(SYM)
 
 # Development commands
 dev:
@@ -188,7 +196,8 @@ setup:
 		cp .env.example .env; \
 		echo "Created .env file - please update with your configuration"; \
 	fi
-	@uv sync
+	@uv sync --extra dev
+	@uv run pre-commit install
 	@echo "Setup complete! Run 'make dev' to start development."
 
 clean:

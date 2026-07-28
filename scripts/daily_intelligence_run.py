@@ -5,6 +5,7 @@ Safe to run manually: uv run python scripts/daily_intelligence_run.py
 
 Does NOT execute any trades. Proposals only.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -90,7 +91,11 @@ def _write_position_snapshots(
             .first()
         )
         if portfolio:
-            for row in session.query(PortfolioPosition).filter_by(portfolio_id=portfolio.id).all():
+            for row in (
+                session.query(PortfolioPosition)
+                .filter_by(portfolio_id=portfolio.id)
+                .all()
+            ):
                 if row.average_cost_basis:
                     avg_costs[row.ticker.upper()] = float(row.average_cost_basis)
 
@@ -186,7 +191,9 @@ def _close_thesis_outcomes(
                 "exit_price": exit_price,
                 "entry_price": entry_price,
                 "return_pct": return_pct,
-                "last_conviction": last_snap.conviction_at_snapshot if last_snap else None,
+                "last_conviction": last_snap.conviction_at_snapshot
+                if last_snap
+                else None,
             }
             thesis.status = "closed"
 
@@ -215,8 +222,8 @@ async def run_vc_loop_pass() -> int:
     result = await run_vc_loop(
         vault_path=vault_path,
         strategy="maverick_bullish",
-        limit=30,        # screener candidates (niche growth universe)
-        top_n=30,        # enrich ALL of them (small universe, worth the cost)
+        limit=30,  # screener candidates (niche growth universe)
+        top_n=30,  # enrich ALL of them (small universe, worth the cost)
         days_ahead=30,
     )
     count = result.get("count", 0)
@@ -257,7 +264,9 @@ def save_snapshot() -> dict:
     diversification: dict = {"applied": False}
     try:
         tickers = [p["ticker"].upper() for p in positions]
-        weights = {p["ticker"].upper(): p["market_value"] / total_value for p in positions}
+        weights = {
+            p["ticker"].upper(): p["market_value"] / total_value for p in positions
+        }
         corr, vols = _fetch_corr_and_vols(tickers)
         if corr:
             clusters = dv.cluster_positions(corr, list(corr.keys()))
@@ -384,20 +393,47 @@ SECTOR_META: dict[str, tuple[str, str]] = {
     "AI/Compute": ("🧠", "AI"),
 }
 
-# Held as tiny "buy more later" reminders, not real sector exposure — surfaced on
-# their own "watching to enter" line, kept out of the sector heat block.
-WATCH_TICKERS = {"SPCX"}
 
-CASH_TARGET = (0.10, 0.15)   # 10–15% is the target band
-CASH_FLOOR  = 0.10           # never deploy below this
+def _load_watch_tickers() -> set[str]:
+    """Symbols on the 'Radar' watchlist (managed via scripts/watch.py).
+
+    Any of these held as tiny "buy more later" reminder-shares are surfaced on
+    their own "watching to enter" line and kept out of the sector heat block.
+    No ticker is hardcoded — add/remove with `make watch-add SYM=...`. Falls
+    back to an empty set if the watchlist can't be read, so a held name simply
+    appears normally rather than crashing the brief.
+    """
+    try:
+        import sqlite3
+
+        con = sqlite3.connect("maverick_mcp.db")
+        cur = con.cursor()
+        cur.execute(
+            "SELECT wi.symbol FROM watchlist_items wi "
+            "JOIN watchlists w ON w.id = wi.watchlist_id WHERE w.name = 'Radar'"
+        )
+        syms = {r[0].upper() for r in cur.fetchall()}
+        con.close()
+        return syms
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+# Names being watched for an entry (from the Radar watchlist).
+WATCH_TICKERS = _load_watch_tickers()
+
+CASH_TARGET = (0.10, 0.15)  # 10–15% is the target band
+CASH_FLOOR = 0.10  # never deploy below this
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
+
 
 def _fetch_benchmark_return() -> dict[str, float | None]:
     """Fetch today's % return for QQQ, IWM, SPY. Returns {} on import failure or error."""
     try:
         import yfinance as yf
+
         result: dict[str, float | None] = {}
         for sym in ("QQQ", "IWM", "SPY"):
             try:
@@ -423,9 +459,9 @@ def _slot_meta(now: datetime) -> tuple[str | None, str, str, str]:
     sending duplicate Morning / premature Close messages.
     """
     SEND_SLOTS = [
-        (8,  0,  "Morning", "🌅"),
-        (12, 30, "Midday",  "☀️"),
-        (16, 15, "Close",   "🌙"),
+        (8, 0, "Morning", "🌅"),
+        (12, 30, "Midday", "☀️"),
+        (16, 15, "Close", "🌙"),
     ]
     CONTEXTS = [
         "Command brief — prepare for the day",
@@ -451,6 +487,7 @@ def _slot_meta(now: datetime) -> tuple[str | None, str, str, str]:
 
 
 # ── Sector heat + edge helpers (shared across slots) ───────────────────────────
+
 
 def _fmt_k(val: float) -> str:
     """$X.Xk above 1k, $X below."""
@@ -498,7 +535,9 @@ def _sector_heat_rows(
         if not in_theme:
             continue
         emoji, label = SECTOR_META[theme_name]
-        cur = sum(cur_val_by_ticker.get(r.ticker, r.market_value or 0) for r in in_theme)
+        cur = sum(
+            cur_val_by_ticker.get(r.ticker, r.market_value or 0) for r in in_theme
+        )
         base = sum(base_val_by_ticker.get(r.ticker, 0) for r in in_theme)
         pct = (cur / roth_total * 100) if roth_total > 0 else 0.0
         move = ((cur - base) / base * 100) if base > 0 else None
@@ -545,7 +584,11 @@ def _trim_candidates(
 ) -> list[tuple[str, float, float]]:
     """Lowest-conviction names holding real capital → (ticker, cv, $val)."""
     cands = [
-        (r.ticker, conviction_by_ticker.get(r.ticker, 50), _cur_val(r, cur_val_by_ticker))
+        (
+            r.ticker,
+            conviction_by_ticker.get(r.ticker, 50),
+            _cur_val(r, cur_val_by_ticker),
+        )
         for r in roth_rows
         if r.ticker not in WATCH_TICKERS
         and conviction_by_ticker.get(r.ticker, 50) < 40
@@ -568,7 +611,8 @@ def _deploy_targets(
         return []
     eq_weight = sum(_cur_val(r, cur_val_by_ticker) for r in live) / len(live)
     cands = [
-        r for r in live
+        r
+        for r in live
         if conviction_by_ticker.get(r.ticker, 0) >= cv_floor
         and _cur_val(r, cur_val_by_ticker) < eq_weight
     ]
@@ -592,18 +636,21 @@ def _low_cv_summary(
 ) -> str | None:
     """`🔴 $4.0k (35%) in N sub-40 names — capital≠conviction` or None."""
     names = [
-        r for r in roth_rows
-        if r.ticker not in WATCH_TICKERS
-        and conviction_by_ticker.get(r.ticker, 50) < 40
+        r
+        for r in roth_rows
+        if r.ticker not in WATCH_TICKERS and conviction_by_ticker.get(r.ticker, 50) < 40
     ]
     cap = sum(_cur_val(r, cur_val_by_ticker) for r in names)
     if cap < 1000 or not names:
         return None
     pct = int(cap / roth_equity * 100) if roth_equity > 0 else 0
-    return f"🔴 {_fmt_k(cap)} ({pct}%) in {len(names)} sub-40 names — capital≠conviction"
+    return (
+        f"🔴 {_fmt_k(cap)} ({pct}%) in {len(names)} sub-40 names — capital≠conviction"
+    )
 
 
 # ── Morning slot (8am) ────────────────────────────────────────────────────────
+
 
 def _send_morning_command_brief(
     *,
@@ -702,10 +749,11 @@ def _send_morning_command_brief(
 
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        tg(text[i:i + 4000])
+        tg(text[i : i + 4000])
 
 
 # ── Midday slot (12:30pm) ─────────────────────────────────────────────────────
+
 
 def _send_midday_exception_report(
     *,
@@ -729,11 +777,13 @@ def _send_midday_exception_report(
     # Live Roth equity + since-morning delta (live where fresh, else snapshot).
     live_equity = sum(
         _cur_val(r, live_val_by_ticker)
-        for r in roth_rows if r.ticker not in WATCH_TICKERS
+        for r in roth_rows
+        if r.ticker not in WATCH_TICKERS
     )
     am_equity = sum(
         prev_value_by_ticker.get(r.ticker, _cur_val(r, live_val_by_ticker))
-        for r in roth_rows if r.ticker not in WATCH_TICKERS
+        for r in roth_rows
+        if r.ticker not in WATCH_TICKERS
     )
     since_am = live_equity - am_equity
 
@@ -762,7 +812,9 @@ def _send_midday_exception_report(
             if prev and prev > 0:
                 pcts.append((cur - prev) / prev * 100)
                 dd += cur - prev
-        if len(pcts) >= 3 and (all(p > 1.0 for p in pcts) or all(p < -1.0 for p in pcts)):
+        if len(pcts) >= 3 and (
+            all(p > 1.0 for p in pcts) or all(p < -1.0 for p in pcts)
+        ):
             baskets.append((theme_name, sum(pcts) / len(pcts), dd))
             covered.update(tks)
     baskets.sort(key=lambda x: abs(x[1]), reverse=True)
@@ -781,7 +833,7 @@ def _send_midday_exception_report(
         lines.append(f"{next_run} ›")
         text = "\n".join(lines)
         for i in range(0, len(text), 4000):
-            tg(text[i:i + 4000])
+            tg(text[i : i + 4000])
         return
 
     lines.append("— material changes —")
@@ -811,10 +863,11 @@ def _send_midday_exception_report(
 
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        tg(text[i:i + 4000])
+        tg(text[i : i + 4000])
 
 
 # ── Close slot (4:15pm) ───────────────────────────────────────────────────────
+
 
 def _send_close_decision_memo(
     *,
@@ -894,10 +947,14 @@ def _send_close_decision_memo(
             det = sorted([x for x in theme_deltas if x[1] < 0], key=lambda x: x[1])
             con = sorted([x for x in theme_deltas if x[1] > 0], key=lambda x: -x[1])
             if det:
-                s = " · ".join(f"{SECTOR_META[n][1]} {_fmt_delta(d)}" for n, d in det[:3])
+                s = " · ".join(
+                    f"{SECTOR_META[n][1]} {_fmt_delta(d)}" for n, d in det[:3]
+                )
                 lines.append(f"🔴 Detractors: {s}")
             if con:
-                s = " · ".join(f"{SECTOR_META[n][1]} {_fmt_delta(d)}" for n, d in con[:3])
+                s = " · ".join(
+                    f"{SECTOR_META[n][1]} {_fmt_delta(d)}" for n, d in con[:3]
+                )
                 lines.append(f"🟢 Contributors: {s}")
 
     # Edge / tomorrow — decisive, dollar-backed
@@ -936,10 +993,11 @@ def _send_close_decision_memo(
 
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        tg(text[i:i + 4000])
+        tg(text[i : i + 4000])
 
 
 # ── Main alert dispatcher ─────────────────────────────────────────────────────
+
 
 def _build_brief_data(brief: dict, slot_label: str) -> dict:
     """Load snapshots, cash, live prices and derived metrics for a brief render.
@@ -961,25 +1019,35 @@ def _build_brief_data(brief: dict, slot_label: str) -> dict:
     #   2. prev_snap     — most recent snapshot before this one (intraday delta)
     #   3. prior_close   — most recent snapshot from a PREVIOUS calendar day (P&L)
     with SessionLocal() as session:
+
         def _max_snap_at(extra_filters=None):
-            q = (
-                session.query(sa_func.max(PositionSnapshot.snapshot_at))
-                .filter(PositionSnapshot.position_closed == False)  # noqa: E712
+            q = session.query(sa_func.max(PositionSnapshot.snapshot_at)).filter(
+                PositionSnapshot.position_closed == False  # noqa: E712
             )
-            for f in (extra_filters or []):
+            for f in extra_filters or []:
                 q = q.filter(f)
             return q.scalar()
 
-        latest_at    = _max_snap_at()
-        prev_snap_at = _max_snap_at([PositionSnapshot.snapshot_at < latest_at]) if latest_at else None
+        latest_at = _max_snap_at()
+        prev_snap_at = (
+            _max_snap_at([PositionSnapshot.snapshot_at < latest_at])
+            if latest_at
+            else None
+        )
         # Daily-P&L baseline: last snapshot from a calendar day strictly before the
         # latest snapshot. Use sa_func.date(), NOT cast(col, Date): in SQLite
         # CAST(ts AS DATE) has numeric affinity and returns the integer YEAR, so the
         # filter is true for every row and prior_close collapses onto today's snapshot.
         latest_date_str = str(latest_at)[:10] if latest_at else ""
-        prior_close_at = _max_snap_at([
-            sa_func.date(PositionSnapshot.snapshot_at) < latest_date_str,
-        ]) if latest_at else None
+        prior_close_at = (
+            _max_snap_at(
+                [
+                    sa_func.date(PositionSnapshot.snapshot_at) < latest_date_str,
+                ]
+            )
+            if latest_at
+            else None
+        )
 
         def _load_snaps(at):
             if not at:
@@ -993,12 +1061,14 @@ def _build_brief_data(brief: dict, slot_label: str) -> dict:
                 .all()
             )
 
-        snap_rows        = _load_snaps(latest_at)
-        prev_snap_rows   = _load_snaps(prev_snap_at)
+        snap_rows = _load_snaps(latest_at)
+        prev_snap_rows = _load_snaps(prev_snap_at)
         prior_close_rows = _load_snaps(prior_close_at)
 
-        prev_value_by_ticker        = {r.ticker: r.market_value or 0 for r in prev_snap_rows}
-        prior_close_value_by_ticker = {r.ticker: r.market_value or 0 for r in prior_close_rows}
+        prev_value_by_ticker = {r.ticker: r.market_value or 0 for r in prev_snap_rows}
+        prior_close_value_by_ticker = {
+            r.ticker: r.market_value or 0 for r in prior_close_rows
+        }
 
         conviction_by_ticker: dict[str, float] = {}
         for row in snap_rows:
@@ -1021,24 +1091,27 @@ def _build_brief_data(brief: dict, slot_label: str) -> dict:
         from maverick_mcp.providers.schwab.sync import summarize_accounts
 
         cfg, store = _load_schwab()
-        client     = SchwabClient(cfg, store)
-        summaries  = summarize_accounts(client.accounts())
+        client = SchwabClient(cfg, store)
+        summaries = summarize_accounts(client.accounts())
         cash = sum(float(s.cash_balance or 0) for s in summaries)
         cash_valid = True
     except Exception as exc:
         logger.warning("Cash balance unavailable: %s", exc)
 
     # Split Roth / long-term account
-    roth_rows   = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
+    roth_rows = [r for r in snap_rows if r.ticker not in TRADITIONAL_TICKERS]
     roth_equity = sum(r.market_value or 0 for r in roth_rows)
-    roth_total  = roth_equity + cash
+    roth_total = roth_equity + cash
 
-    off_screen = [t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS]
+    off_screen = [
+        t for t in (screen.get("held_off_screen") or []) if t not in TRADITIONAL_TICKERS
+    ]
     has_prior_close = bool(prior_close_value_by_ticker)
 
     day_delta = sum(
         (r.market_value or 0) - prior_close_value_by_ticker[r.ticker]
-        for r in roth_rows if r.ticker in prior_close_value_by_ticker
+        for r in roth_rows
+        if r.ticker in prior_close_value_by_ticker
     )
 
     # ── Live intraday prices (Tiingo) — freshness for midday/close ───────────────
@@ -1082,8 +1155,8 @@ def _build_brief_data(brief: dict, slot_label: str) -> dict:
 
 _SLOT_RENDERERS = {
     "Morning": _send_morning_command_brief,
-    "Midday":  _send_midday_exception_report,
-    "Close":   _send_close_decision_memo,
+    "Midday": _send_midday_exception_report,
+    "Close": _send_close_decision_memo,
 }
 
 
@@ -1091,7 +1164,7 @@ def send_run_alert(brief: dict) -> None:
     """Send Telegram push — exactly 3 messages per day: Morning, Midday, Close."""
     import requests
 
-    token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         logger.debug("Telegram not configured — skipping alert")
@@ -1102,7 +1175,10 @@ def send_run_alert(brief: dict) -> None:
 
     # Data-only runs (9:45, 14:30) — snapshot already saved; nothing to send.
     if slot_label is None:
-        logger.info("Data-only run at %s — snapshot saved, no Telegram message", now.strftime("%H:%M"))
+        logger.info(
+            "Data-only run at %s — snapshot saved, no Telegram message",
+            now.strftime("%H:%M"),
+        )
         return
 
     def _tg(msg: str) -> None:
@@ -1113,7 +1189,9 @@ def send_run_alert(brief: dict) -> None:
                 timeout=10,
             )
             if not resp.ok:
-                logger.warning("Telegram send failed: %s %s", resp.status_code, resp.text[:200])
+                logger.warning(
+                    "Telegram send failed: %s %s", resp.status_code, resp.text[:200]
+                )
         except Exception as exc:
             logger.warning("Telegram error: %s", exc)
 
@@ -1133,6 +1211,7 @@ def render_previews() -> None:
     brief: dict = {}
     try:
         from maverick_mcp.api.routers.investment_ops import _get_screen_sets
+
         _, _, off_screen = _get_screen_sets()
         held = _get_prev_snapshot_tickers()
         brief = {"screen": {"held_off_screen": sorted(off_screen & held)}}
@@ -1140,9 +1219,9 @@ def render_previews() -> None:
         brief = {}
 
     slots = [
-        ("Morning", now.replace(hour=8,  minute=1)),
-        ("Midday",  now.replace(hour=12, minute=31)),
-        ("Close",   now.replace(hour=16, minute=16)),
+        ("Morning", now.replace(hour=8, minute=1)),
+        ("Midday", now.replace(hour=12, minute=31)),
+        ("Close", now.replace(hour=16, minute=16)),
     ]
 
     for slot_label, slot_now in slots:
@@ -1155,15 +1234,20 @@ def render_previews() -> None:
         )
         body = "\n".join(captured)
         print(f"\n{'═' * 60}")
-        print(f"  {slot_label.upper()} PREVIEW  ·  {len(body)} chars  ·  "
-              f"{'live' if data['live_fresh'] else 'snapshot'} prices")
+        print(
+            f"  {slot_label.upper()} PREVIEW  ·  {len(body)} chars  ·  "
+            f"{'live' if data['live_fresh'] else 'snapshot'} prices"
+        )
         print("═" * 60)
         print(body)
     print(f"\n{'═' * 60}\n(preview only — no Telegram sent)")
 
 
 async def main() -> None:
-    logger.info("=== Maverick daily intelligence run — %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.info(
+        "=== Maverick daily intelligence run — %s ===",
+        datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
 
     # 1. Sync live positions from Schwab into local DB
     try:
