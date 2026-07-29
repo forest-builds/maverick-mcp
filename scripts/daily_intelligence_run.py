@@ -393,6 +393,21 @@ SECTOR_META: dict[str, tuple[str, str]] = {
     "AI/Compute": ("🧠", "AI"),
 }
 
+# Fixed display order for the sector heat block — the SAME every brief, every
+# day, so the layout is scannable and never re-sorts (near-equal sectors used to
+# swap places between morning and close on tiny intraday moves). Ordered by
+# typical weight; a sector with no held names is simply skipped.
+SECTOR_ORDER: list[str] = [
+    "Space",
+    "Nuclear/Materials",
+    "Fintech",
+    "Quantum",
+    "Drones/Autonomy",
+    "Precision Tech",
+    "Energy Storage",
+    "AI/Compute",
+]
+
 
 def _load_watch_tickers() -> set[str]:
     """Symbols on the 'Radar' watchlist (managed via scripts/watch.py).
@@ -528,9 +543,13 @@ def _sector_heat_rows(
     base_val_by_ticker: dict[str, float],
     roth_total: float,
 ) -> list[tuple]:
-    """One (emoji, label, $val, %roth, move%) per held sector, sorted by $ desc."""
+    """One (emoji, label, $val, %roth, move%) per held sector, in fixed
+    canonical SECTOR_ORDER so the block reads identically across all briefs."""
     rows = []
-    for theme_name, tks in THEMES.items():
+    for theme_name in SECTOR_ORDER:
+        tks = THEMES.get(theme_name)
+        if not tks:
+            continue
         in_theme = [r for r in roth_rows if r.ticker in tks]
         if not in_theme:
             continue
@@ -542,7 +561,6 @@ def _sector_heat_rows(
         pct = (cur / roth_total * 100) if roth_total > 0 else 0.0
         move = ((cur - base) / base * 100) if base > 0 else None
         rows.append((emoji, label, cur, pct, move))
-    rows.sort(key=lambda x: x[2], reverse=True)
     return rows
 
 
@@ -770,95 +788,65 @@ def _send_midday_exception_report(
     next_run: str,
     **_,
 ) -> None:
-    """Exception report: what moved since morning, off live prices when available."""
+    """Midday: the SAME normalized sector block as morning/close, windowed to
+    'since AM'. No per-name 'sector move' repetition — only names genuinely
+    diverging from their own sector get a callout."""
     run_time = now.strftime("%-I:%M%p").lower().lstrip("0")
     qqq = benchmark_returns.get("QQQ") if benchmark_returns else None
 
-    # Live Roth equity + since-morning delta (live where fresh, else snapshot).
-    live_equity = sum(
-        _cur_val(r, live_val_by_ticker)
-        for r in roth_rows
-        if r.ticker not in WATCH_TICKERS
-    )
+    active = [r for r in roth_rows if r.ticker not in WATCH_TICKERS]
+    cur_by = {r.ticker: _cur_val(r, live_val_by_ticker) for r in active}
+    live_equity = sum(cur_by.values())
     am_equity = sum(
-        prev_value_by_ticker.get(r.ticker, _cur_val(r, live_val_by_ticker))
-        for r in roth_rows
-        if r.ticker not in WATCH_TICKERS
+        prev_value_by_ticker.get(r.ticker, cur_by[r.ticker]) for r in active
     )
     since_am = live_equity - am_equity
 
-    # Per-ticker moves since morning.
-    movers: list[tuple[str, float, float]] = []  # (ticker, pct, $delta)
-    for r in roth_rows:
-        if r.ticker in WATCH_TICKERS:
-            continue
-        prev = prev_value_by_ticker.get(r.ticker)
-        cur = _cur_val(r, live_val_by_ticker)
-        if prev and prev > 0:
-            pct = (cur - prev) / prev * 100
-            if abs(pct) >= 3.0:
-                movers.append((r.ticker, pct, cur - prev))
-    movers.sort(key=lambda x: abs(x[1]), reverse=True)
-
-    # Theme baskets that moved as one unit since morning.
-    baskets: list[tuple[str, float, float]] = []  # (theme, avg%, $delta)
-    covered: set[str] = set()
-    for theme_name, tks in THEMES.items():
-        in_theme = [r for r in roth_rows if r.ticker in tks]
-        pcts, dd = [], 0.0
-        for r in in_theme:
-            prev = prev_value_by_ticker.get(r.ticker)
-            cur = _cur_val(r, live_val_by_ticker)
-            if prev and prev > 0:
-                pcts.append((cur - prev) / prev * 100)
-                dd += cur - prev
-        if len(pcts) >= 3 and (
-            all(p > 1.0 for p in pcts) or all(p < -1.0 for p in pcts)
-        ):
-            baskets.append((theme_name, sum(pcts) / len(pcts), dd))
-            covered.update(tks)
-    baskets.sort(key=lambda x: abs(x[1]), reverse=True)
-
     src = "·live" if live_fresh else "·snapshot"
-    lines = [f"☀️ MAVERICK MIDDAY · {run_time} {src}"]
     qqq_str = f" · QQQ {qqq:+.1f}%" if qqq is not None else ""
-    lines.append(
+    lines = [
+        f"☀️ MAVERICK MIDDAY · {run_time} {src}",
         f"📊 Roth {_fmt_k(live_equity)} · {_arrow(since_am if am_equity else None)}"
-        f"{_fmt_delta(since_am)} since AM{qqq_str}"
-    )
+        f"{_fmt_delta(since_am)} since AM{qqq_str}",
+    ]
 
-    if not movers and not baskets:
-        lines.append("✓ No material exceptions since morning.")
-        lines.append("Watching: theme correlation · moves >3% · thesis triggers.")
-        lines.append(f"{next_run} ›")
-        text = "\n".join(lines)
-        for i in range(0, len(text), 4000):
-            tg(text[i : i + 4000])
-        return
+    # Identical normalized sector block, windowed since AM (base = morning snap).
+    rows = _sector_heat_rows(active, cur_by, prev_value_by_ticker, roth_total)
+    moved = any(r[4] is not None and abs(r[4]) >= 0.3 for r in rows)
+    if moved:
+        lines.append("🔥 SINCE AM")
+        lines.extend(_render_heat(rows, mark_weakest=True))
+    else:
+        lines.append("✓ Quiet — no material moves since morning.")
 
-    lines.append("— material changes —")
-    for theme_name, avg, dd in baskets[:3]:
-        emoji, label = SECTOR_META[theme_name]
-        flag = "🔴" if avg < 0 else "🟢"
-        word = "all red" if avg < 0 else "all green"
-        names = " ".join(sorted(THEMES[theme_name]))
-        rel = f" (vs QQQ {avg - qqq:+.1f}%)" if qqq is not None else ""
-        lines.append(
-            f"{flag} {emoji} {label} basket {word} {_arrow(avg)}{abs(avg):.1f}% "
-            f"({_fmt_delta(dd)}){rel} · {names}"
-        )
-
-    for ticker, pct, dd in movers:
-        if ticker in covered:
+    # Genuine outliers only: a name diverging materially from its own sector.
+    outliers: list[tuple[str, float, float, str, str]] = []
+    for theme_name in SECTOR_ORDER:
+        tks = THEMES.get(theme_name) or set()
+        pcts = {}
+        for r in active:
+            if r.ticker in tks:
+                prev = prev_value_by_ticker.get(r.ticker)
+                if prev and prev > 0:
+                    pcts[r.ticker] = (cur_by[r.ticker] - prev) / prev * 100
+        if not pcts:
             continue
-        flag = "🔴" if pct < 0 else "🟢"
-        in_theme = any(ticker in tks for tks in THEMES.values())
-        why = "sector move — check basket" if in_theme else "off-theme — check news"
-        lines.append(
-            f"{flag} {ticker} {_arrow(pct)}{abs(pct):.1f}% ({_fmt_delta(dd)}) — {why}"
-        )
+        avg = sum(pcts.values()) / len(pcts)
+        emoji, label = SECTOR_META[theme_name]
+        for t, p in pcts.items():
+            if abs(p - avg) >= 4.0 and abs(p) >= 3.0:
+                outliers.append((t, p, avg, emoji, label))
+    outliers.sort(key=lambda x: abs(x[1] - x[2]), reverse=True)
 
-    lines.append("No trade without news/volume confirmation.")
+    if outliers:
+        for t, p, avg, emoji, label in outliers[:4]:
+            lines.append(
+                f"⚑ {t} {_arrow(p)}{abs(p):.1f}% vs {emoji} {label} "
+                f"{_arrow(avg)}{abs(avg):.1f}% — outlier, check news"
+            )
+    elif moved:
+        lines.append("⚑ Broad move — no single-name outliers vs sector.")
+
     lines.append(f"{next_run} ›")
 
     text = "\n".join(lines)
@@ -984,10 +972,6 @@ def _send_close_decision_memo(
                     f"(cv spread {min(cvs):.0f}–{max(cvs):.0f})"
                 )
                 break
-
-    watch = _watch_line(roth_rows)
-    if watch:
-        lines.append(watch)
 
     lines.append(f"{next_run} ›")
 

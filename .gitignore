@@ -99,3 +99,4 @@ _bmad/custom/*.user.toml
 .local/
 .gitnexus/
 secrets/
+_bmad-output/
