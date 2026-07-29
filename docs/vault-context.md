@@ -6,18 +6,14 @@
 
 ## Currently working on
 
-Closing the gaps found by a `/setup` agent-readiness audit: commit-time/CI secret
-scanning, gated SAST/dependency-vuln checks, a Dependabot cooling window, and
-Claude Code hooks (format-after-edit, protected-path guard). See
-`_bmad-output/implementation-artifacts/spec-setup-agent-ready.md`.
+Nothing in flight. The `/setup` agent-readiness audit (commit-time/CI secret
+scanning, gated SAST/dependency-vuln checks, a Dependabot cooling window,
+Claude Code hooks) and the deep `.gitignore` audit are both done — see
+`_bmad-output/implementation-artifacts/spec-setup-agent-ready.md` and
+`deferred-work.md`.
 
 ## Open hypotheses / unresolved questions
 
-- A deep `.gitignore` audit is still pending (deferred — see
-  `_bmad-output/implementation-artifacts/deferred-work.md`). Note:
-  `.claude/settings.local.json` was checked in detail during this work and is
-  correctly gitignored/untracked — no issue there, despite an earlier (wrong)
-  note in this file claiming otherwise.
 - `pip-audit` found 50 known CVEs across 14 dependencies (aiohttp, starlette, mcp,
   langchain, cryptography, pillow, and others), all with fix versions already
   published. Not yet triaged or scheduled.
